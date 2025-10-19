@@ -11,7 +11,7 @@ def ctc_preprocess(batch):
     
     labels_concat = torch.cat(labels)
 
-    input_lengths = torch.full((len(batch),), images.size(-1) // 4, dtype=torch.long) 
+    input_lengths = torch.full((len(batch),), 128, dtype=torch.long)
     target_lengths = torch.tensor(label_len, dtype=torch.long)
     
     return images, labels_concat, input_lengths, target_lengths
