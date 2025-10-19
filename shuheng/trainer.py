@@ -84,10 +84,10 @@ class Trainer(ABC):
             total_loss = 0
             progress_bar = tqdm(self.loader, desc=f"Epoch {self.current_epoch}/{self.epochs}")
             
-            for batch_idx, (images, labels, input_lengths, target_lengths) in enumerate(progress_bar):
+            for batch_idx, (images, labels, _, target_lengths) in enumerate(progress_bar):
                 images = images.to(self.device)
                 labels = labels.to(self.device)
-                input_lengths = input_lengths.to(self.device)
+
                 target_lengths = target_lengths.to(self.device)
 
                 self.optimizer.zero_grad()
@@ -96,6 +96,8 @@ class Trainer(ABC):
                     with torch.cuda.amp.autocast():
                         logits = self.model(images)
                         logits = self._process_results(logits)
+                        T, N, _ = logits.shape
+                        input_lengths = torch.full((N, ), T, dtype=torch.long).to(self.device)
                         loss = self.criterion(logits, labels, input_lengths, target_lengths)
 
                     self.scaler.scale(loss).backward()
