@@ -20,7 +20,9 @@ class CaptchaModel(nn.Module):
             nn.ReLU()
         )
 
-        self.gru: nn.Module = nn.GRU(512 * 2, 128, bidirectional=True, num_layers=1, batch_first=True)
+        self.linear = nn.Linear(8192, 1024)
+
+        self.gru: nn.Module = nn.GRU(1024, 128, bidirectional=True, num_layers=1, batch_first=True)
         self.fc = nn.Linear(256, self.n_classes)
 
     @override
@@ -31,6 +33,7 @@ class CaptchaModel(nn.Module):
         x = x.permute(0, 3, 1, 2)
         x = x.reshape(B, W, C * H)
 
+        x = self.linear(x) 
         x, _ = self.gru(x)
 
         return self.fc(x)
