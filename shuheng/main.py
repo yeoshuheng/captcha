@@ -69,16 +69,19 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Train or test CAPTCHA recognition model.")
-    parser.add_argument("--data_dir", type=str, required=True, help="Directory containing CAPTCHA images")
+    parser.add_argument("--train_dir", type=str, required=True, help="Directory containing CAPTCHA images and labels")
+    parser.add_argument("--test_dir",  required=True, help="Directory containing CAPTCHA images and labels")
     parser.add_argument("--checkpoint", type=str, default="./checkpoint", help="Path to model checkpoint for testing")
     
     args = parser.parse_args()
 
-    file_paths, labels = get_image_paths_and_labels(args.data_dir)
+    file_paths, labels = get_image_paths_and_labels(args.train_dir)
 
     train_captcha_model(train_file_paths=file_paths, train_labels=labels)
 
-    
+
+    file_paths, labels = get_image_paths_and_labels(args.test_dir)
+
     test_captcha_model(
         test_model_ckpt_fp=args.checkpoint,
         test_file_paths=file_paths,
