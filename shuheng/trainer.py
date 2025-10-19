@@ -111,6 +111,8 @@ class Trainer(ABC):
                 else:
                     logits = self.model(images)
                     logits = self._process_results(logits)
+                    T, N, _ = logits.shape
+                    input_lengths = torch.full((N, ), T, dtype=torch.long).to(self.device)
                     loss = self.criterion(logits, labels, input_lengths, target_lengths)
 
                     if self.gradient_clip != -1:

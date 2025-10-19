@@ -52,6 +52,9 @@ def test_captcha_model(test_model_ckpt_fp: str, test_file_paths: List[str], test
             logits = model(images)
             logits = F.log_softmax(logits, dim=2)
 
+            print(f"[DEBUG] After log_softmax - shape: {logits.shape}")
+            print(f"[DEBUG] After log_softmax - min/max: {logits.min():.4f} / {logits.max():.4f}")
+
             predicted_captchas = decode(logits.cpu())
 
             true_labels = []

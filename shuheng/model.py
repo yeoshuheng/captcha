@@ -5,7 +5,7 @@ from typing_extensions import override
 class CaptchaModel(nn.Module):
     def __init__(self, n_classes: int):
         super().__init__()
-        self.n_classes = n_classes
+        self.n_classes = n_classes + 1
 
         self.conv_layers: nn.Module = nn.Sequential(
             nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1, dilation=1),
