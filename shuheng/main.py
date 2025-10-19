@@ -62,7 +62,7 @@ def test_captcha_model(test_model_ckpt_fp: str, test_file_paths: List[str], test
                 true_labels.append("".join(chars))
                 start += length
 
-            for pred, true in zip(predicted_captchas, true_labels)[:1]:
+            for pred, true in list(zip(predicted_captchas, true_labels))[:1]:
                 print(f"[DEBUG] predicted: {pred}, true: {true}")
 
             for pred, true in zip(predicted_captchas, true_labels):
