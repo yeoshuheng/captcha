@@ -71,7 +71,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train or test CAPTCHA recognition model.")
     parser.add_argument("--train_dir", type=str, required=True, help="Directory containing CAPTCHA images and labels")
     parser.add_argument("--test_dir",  required=True, help="Directory containing CAPTCHA images and labels")
-    parser.add_argument("--checkpoint", type=str, default="./checkpoint", help="Path to model checkpoint for testing")
+    parser.add_argument("--checkpoint", type=str, default="./checkpoints", help="Path to model checkpoint for testing")
     parser.add_argument("--epochs", type = int, required=True)
     parser.add_argument("--lr", type=float, required=True)
 
