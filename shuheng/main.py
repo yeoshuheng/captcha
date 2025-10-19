@@ -56,6 +56,17 @@ def test_captcha_model(test_model_ckpt_fp: str, test_file_paths: List[str], test
             print(f"[DEBUG] After log_softmax - shape: {logits.shape}")
             print(f"[DEBUG] After log_softmax - min/max: {logits.min():.4f} / {logits.max():.4f}")
 
+            argmax_vals = logits.argmax(dim=2)
+            print(f"[DEBUG] Argmax values shape: {argmax_vals.shape}")
+            print(f"[DEBUG] Argmax unique values: {torch.unique(argmax_vals).tolist()}")
+            print(f"[DEBUG] First sequence (first 30 timesteps): {argmax_vals[:30, 0].tolist()}")
+            print(f"[DEBUG] Count of non-zero predictions: {(argmax_vals != 0).sum().item()} / {argmax_vals.numel()}")
+            
+            # Check if model is just predicting blank everywhere
+            blank_ratio = (argmax_vals == 0).float().mean().item()
+            print(f"[DEBUG] Blank token ratio: {blank_ratio:.2%}")
+
+
             predicted_captchas = decode(logits.cpu())
 
             true_labels = []
