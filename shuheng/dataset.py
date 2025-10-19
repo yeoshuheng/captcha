@@ -50,10 +50,9 @@ class CaptchaImageDataset(Dataset):
 
         if img.shape[0] == 4:
             img = img[:3, :, :] 
-            
+
         label =  self._captcha[i]
         
         img = self.transform(img)
-        label = torch.Tensor([self._char_to_int[c] for c in label], dtype=torch.long)
-
+        label = torch.tensor([self._char_to_int[c] for c in label], dtype=torch.long)
         return img, label, len(label)

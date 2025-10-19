@@ -7,7 +7,7 @@ from model import CaptchaModel
 from dataset import CHARSET, CaptchaImageDataset, get_image_paths_and_labels
 from ctc_trainer import ctc_criterion, CTCTrainer, ctc_preprocess, decode
 
-def train_captcha_model(train_file_paths: List[str], train_labels: List[str]):
+def train_captcha_model(epochs, train_file_paths: List[str], train_labels: List[str]):
     n_classes = len(CHARSET)
 
     model = CaptchaModel(n_classes=n_classes)
@@ -19,7 +19,7 @@ def train_captcha_model(train_file_paths: List[str], train_labels: List[str]):
         dataset=dataset,
         criterion_function=ctc_criterion,
         optimizer=torch.optim.Adam,
-        epochs=50,
+        epochs=epochs,
         lr=1e-3,
         batch_size=32,
         collate_function=ctc_preprocess,
@@ -72,12 +72,13 @@ if __name__ == "__main__":
     parser.add_argument("--train_dir", type=str, required=True, help="Directory containing CAPTCHA images and labels")
     parser.add_argument("--test_dir",  required=True, help="Directory containing CAPTCHA images and labels")
     parser.add_argument("--checkpoint", type=str, default="./checkpoint", help="Path to model checkpoint for testing")
-    
+    parser.add_argument("--epochs", type = int, required=True)
+
     args = parser.parse_args()
 
     file_paths, labels = get_image_paths_and_labels(args.train_dir)
 
-    train_captcha_model(train_file_paths=file_paths, train_labels=labels)
+    train_captcha_model(epochs=args.epochs, train_file_paths=file_paths, train_labels=labels)
 
 
     file_paths, labels = get_image_paths_and_labels(args.test_dir)
