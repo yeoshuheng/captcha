@@ -1,6 +1,6 @@
 import torch
-from .trainer import Trainer
-from .dataset import CHARSET
+from trainer import Trainer
+from dataset import CHARSET
 from typing_extensions import override
 import torch.nn as nn
 

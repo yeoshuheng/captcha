@@ -3,9 +3,9 @@ from torch.utils.data import DataLoader
 import torch.nn.functional as F
 
 from typing import List
-from .model import CaptchaModel
-from .dataset import CHARSET, CaptchaImageDataset, get_image_paths_and_labels
-from .ctc_trainer import ctc_criterion, CTCTrainer, ctc_preprocess, decode
+from model import CaptchaModel
+from dataset import CHARSET, CaptchaImageDataset, get_image_paths_and_labels
+from ctc_trainer import ctc_criterion, CTCTrainer, ctc_preprocess, decode
 
 def train_captcha_model(train_file_paths: List[str], train_labels: List[str]):
     n_classes = len(CHARSET)
