@@ -79,7 +79,7 @@ if __name__ == "__main__":
 
     file_paths, labels = get_image_paths_and_labels(args.train_dir)
 
-    train_captcha_model(lr, args.lr, epochs=args.epochs, train_file_paths=file_paths, train_labels=labels)
+    train_captcha_model(args.lr, epochs=args.epochs, train_file_paths=file_paths, train_labels=labels)
 
 
     file_paths, labels = get_image_paths_and_labels(args.test_dir)
