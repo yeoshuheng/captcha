@@ -46,7 +46,7 @@ def test_captcha_model(test_model_ckpt_fp: str, test_file_paths: List[str], test
     total = 0
 
     with torch.inference_mode():
-        for images, labels_concat, input_lengths, target_lengths in dataloader:
+        for images, labels_concat, _, target_lengths in dataloader:
             images = images.to(device) 
             
             logits = model(images)
@@ -62,11 +62,14 @@ def test_captcha_model(test_model_ckpt_fp: str, test_file_paths: List[str], test
                 true_labels.append("".join(chars))
                 start += length
 
+            for pred, true in zip(predicted_captchas, true_labels)[:1]:
+                print(f"[DEBUG] predicted: {pred}, true: {true}")
+
             for pred, true in zip(predicted_captchas, true_labels):
                 if pred == true:
                     correct += 1
                 total += 1
-                
+
     accuracy = correct / total * 100
     print(f"Accuracy: {accuracy:.2f}% ({correct}/{total})")
     return accuracy
