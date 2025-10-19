@@ -47,6 +47,10 @@ class CaptchaImageDataset(Dataset):
 
     def __getitem__(self, i):
         img = read_image(self._file_paths[i]).float()
+
+        if img.shape[0] == 4:
+            img = img[:3, :, :] 
+            
         label =  self._captcha[i]
         
         img = self.transform(img)
