@@ -35,32 +35,38 @@ def test_captcha_model(test_model_ckpt_fp: str, test_file_paths: List[str], test
     
     model = CaptchaModel(n_classes=n_classes)
     model.load_state_dict(torch.load(test_model_ckpt_fp)["model_state_dict"])
-    model.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
     model.eval()
 
     dataset = CaptchaImageDataset(test_file_paths, test_labels)
-    dataloader = DataLoader(dataset, batch_size=32)
+    dataloader = DataLoader(dataset, batch_size=32, collate_fn=ctc_preprocess)
 
     correct = 0
     total = 0
 
     with torch.inference_mode():
-        for images, label, label_lengths in dataloader:
+        for images, labels_concat, input_lengths, target_lengths in dataloader:
+            images = images.to(device) 
+            
             logits = model(images)
             logits = F.log_softmax(logits, dim=2)
 
-            predicted_captchas = decode(logits.cpu())    
+            predicted_captchas = decode(logits.cpu())
 
             true_labels = []
-            for label_seq, length in zip(label, label_lengths):
-                chars = [CHARSET[idx - 1] for idx in label_seq[:length]]
+            start = 0
+            for length in target_lengths:
+                label_seq = labels_concat[start : start + length]
+                chars = [CHARSET[idx - 1] for idx in label_seq]
                 true_labels.append("".join(chars))
+                start += length
 
             for pred, true in zip(predicted_captchas, true_labels):
                 if pred == true:
                     correct += 1
                 total += 1
-
+                
     accuracy = correct / total * 100
     print(f"Accuracy: {accuracy:.2f}% ({correct}/{total})")
     return accuracy
