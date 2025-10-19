@@ -25,7 +25,7 @@ def train_captcha_model(lr, epochs, train_file_paths: List[str], train_labels: L
         collate_function=ctc_preprocess,
         checkpoint_interval=5,
         best_model_checkpoint=True,
-        gradient_clip=1.0 
+        gradient_clip=5.0 
     )
 
     trainer.train()
