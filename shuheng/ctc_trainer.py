@@ -23,30 +23,23 @@ def ctc_criterion(log_probs, targets, input_lengths, target_lengths):
     )
 
 def decode(tensor: torch.Tensor):
-    selection = tensor.argmax(dim=2) 
-    
-    selection = selection.transpose(0, 1)
+    selection = tensor.argmax(dim=2)
     
     decoded_captchas = []
     
-    for seq in selection:
-        curr_captcha = []
-        prev = None  
+    for batch_idx in range(selection.shape[1]):
+        seq = selection[:, batch_idx] 
         
-        for selected_idx in seq:
-            idx = selected_idx.item()
-            
-            if idx == 0:
-                prev = idx
-                continue
-            
-            if idx == prev:
-                continue
-            
-            curr_captcha.append(CHARSET[idx - 1])
+        output = []
+        prev = -1
+        
+        for idx in seq:
+            idx = idx.item()
+            if idx != 0 and idx != prev:  
+                output.append(CHARSET[idx - 1])
             prev = idx
         
-        decoded_captchas.append("".join(curr_captcha))
+        decoded_captchas.append("".join(output))
     
     return decoded_captchas
 
