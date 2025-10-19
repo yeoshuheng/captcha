@@ -17,7 +17,7 @@ class Trainer(ABC):
         criterion_function: Callable[..., torch.Tensor],
         optimizer: type = torch.optim.Adam,
         epochs: int = 30,
-        lr: float = 1e-3,
+        lr: float = 1e-5,
         batch_size: int = 64,
         device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         checkpoint_dir: str = "./checkpoints",
