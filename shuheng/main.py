@@ -34,7 +34,7 @@ def test_captcha_model(test_model_ckpt_fp: str, test_file_paths: List[str], test
     n_classes = len(CHARSET)
     
     model = CaptchaModel(n_classes=n_classes)
-    model.load_state_dict(torch.load(test_model_ckpt_fp))
+    model.load_state_dict(torch.load(test_model_ckpt_fp)["model_state_dict"])
     model.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
     model.eval()
 
@@ -85,7 +85,7 @@ if __name__ == "__main__":
     file_paths, labels = get_image_paths_and_labels(args.test_dir)
 
     test_captcha_model(
-        test_model_ckpt_fp=args.checkpoint,
+        test_model_ckpt_fp=f"{args.checkpoint}/best_model.pth",
         test_file_paths=file_paths,
         test_labels=labels
     )
