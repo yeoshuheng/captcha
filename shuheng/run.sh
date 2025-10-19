@@ -3,4 +3,5 @@
 cd ${SLURM_SUBMIT_DIR}
 
 python main.py \
-    --data_dir 
+    --train_dir ../../train/ \
+    --test_dir ../../test/
