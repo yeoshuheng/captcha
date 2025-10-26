@@ -100,13 +100,13 @@ class CRNNModel(nn.Module):
             nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),  # H/2, W/2
+            nn.MaxPool2d(kernel_size=2, stride=2),  # H/2, W/2 -> 16x64
             
             # Layer 2: 64 -> 128
             nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),  # H/4, W/4
+            nn.MaxPool2d(kernel_size=2, stride=2),  # H/4, W/4 -> 8x32
             
             # Layer 3: 128 -> 256
             nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
@@ -117,7 +117,7 @@ class CRNNModel(nn.Module):
             nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 1)),  # H/8, W/4
+            nn.MaxPool2d(kernel_size=(2, 1)),  # H/8, W/4 -> 4x32
             
             # Layer 5: 256 -> 512
             nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1),
@@ -128,21 +128,42 @@ class CRNNModel(nn.Module):
             nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 1)),  # H/16, W/4
+            nn.MaxPool2d(kernel_size=(2, 1)),  # H/16, W/4 -> 2x32
         )
+        
+        # Map pooling to calculate actual feature dimensions
+        # Input: 32x128 -> after pooling: 2x32
+        # Feature size: 512 channels * 2 height = 1024
         
         # Bidirectional LSTM
         self.rnn = nn.LSTM(
-            input_size=512 * 2,  # CNN output channels * height
+            input_size=512 * 2,  # 1024
             hidden_size=hidden_size,
             num_layers=2,
             bidirectional=True,
             dropout=0.3,
-            batch_first=False  # Input shape: (seq_len, batch, features)
+            batch_first=False
         )
         
         # Fully connected layer
-        self.fc = nn.Linear(hidden_size * 2, num_classes)  # *2 for bidirectional
+        self.fc = nn.Linear(hidden_size * 2, num_classes)
+        
+        # Initialize weights properly
+        self._initialize_weights()
+    
+    def _initialize_weights(self):
+        """Proper weight initialization is crucial for CTC training."""
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
     
     def forward(self, x):
         # CNN feature extraction
@@ -171,13 +192,13 @@ class CRNNModel(nn.Module):
 # Training
 # ============================================================================
 
-def train_model(model, train_loader, criterion, optimizer, device, epoch):
+def train_model(model, train_loader, criterion, optimizer, device, epoch, debug=False):
     """Train for one epoch."""
     model.train()
     total_loss = 0
     
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
-    for images, labels, label_lengths in pbar:
+    for batch_idx, (images, labels, label_lengths) in enumerate(pbar):
         images = images.to(device)
         labels = labels.to(device)
         label_lengths = label_lengths.to(device)
@@ -185,8 +206,21 @@ def train_model(model, train_loader, criterion, optimizer, device, epoch):
         # Forward pass
         outputs = model(images)  # (seq_len, batch, num_classes)
         
+        # Debug first batch of first epoch
+        if debug and batch_idx == 0:
+            print(f"\n[TRAIN DEBUG] Outputs shape: {outputs.shape}")
+            print(f"[TRAIN DEBUG] Outputs min/max: {outputs.min():.4f} / {outputs.max():.4f}")
+            print(f"[TRAIN DEBUG] Label lengths: {label_lengths.tolist()[:5]}")
+            print(f"[TRAIN DEBUG] Sequence length: {outputs.size(0)}")
+        
         # Apply log_softmax for CTC
         log_probs = F.log_softmax(outputs, dim=2)
+        
+        if debug and batch_idx == 0:
+            print(f"[TRAIN DEBUG] Log probs min/max: {log_probs.min():.4f} / {log_probs.max():.4f}")
+            argmax_preds = log_probs.argmax(dim=2)
+            blank_ratio = (argmax_preds == 0).float().mean().item()
+            print(f"[TRAIN DEBUG] Blank ratio in predictions: {blank_ratio:.2%}")
         
         # Input lengths (sequence length from model output)
         seq_len = log_probs.size(0)
@@ -194,6 +228,9 @@ def train_model(model, train_loader, criterion, optimizer, device, epoch):
         
         # Compute CTC loss
         loss = criterion(log_probs, labels, input_lengths, label_lengths)
+        
+        if debug and batch_idx == 0:
+            print(f"[TRAIN DEBUG] Loss: {loss.item():.4f}")
         
         # Backward pass
         optimizer.zero_grad()
@@ -311,9 +348,9 @@ def main():
     parser = argparse.ArgumentParser(description='Train CAPTCHA recognition model with CTC')
     parser.add_argument('--train_dir', type=str, required=True, help='Training data directory')
     parser.add_argument('--test_dir', type=str, required=True, help='Test data directory')
-    parser.add_argument('--epochs', type=int, default=20, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
-    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('--epochs', type=int, default=30, help='Number of epochs')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
+    parser.add_argument('--lr', type=float, default=0.0005, help='Learning rate (default: 0.0005)')
     parser.add_argument('--hidden_size', type=int, default=256, help='RNN hidden size')
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints', help='Checkpoint directory')
     args = parser.parse_args()
@@ -356,7 +393,7 @@ def main():
     
     # Loss and optimizer
     criterion = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=3
     )
@@ -370,7 +407,7 @@ def main():
         print(f"{'='*60}")
         
         # Train
-        train_loss = train_model(model, train_loader, criterion, optimizer, device, epoch)
+        train_loss = train_model(model, train_loader, criterion, optimizer, device, epoch, debug=(epoch == 1))
         print(f"Train Loss: {train_loss:.4f}")
         
         # Evaluate
