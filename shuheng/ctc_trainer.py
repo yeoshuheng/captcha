@@ -10,11 +10,9 @@ def ctc_preprocess(batch):
     images = torch.stack(images)
     
     labels_concat = torch.cat(labels)
-
-    input_lengths = torch.full((len(batch),), 128, dtype=torch.long)
     target_lengths = torch.tensor(label_len, dtype=torch.long)
     
-    return images, labels_concat, input_lengths, target_lengths
+    return images, labels_concat, target_lengths
 
 
 def ctc_criterion(log_probs, targets, input_lengths, target_lengths):

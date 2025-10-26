@@ -84,7 +84,7 @@ class Trainer(ABC):
             total_loss = 0
             progress_bar = tqdm(self.loader, desc=f"Epoch {self.current_epoch}/{self.epochs}")
             
-            for batch_idx, (images, labels, _, target_lengths) in enumerate(progress_bar):
+            for batch_idx, (images, labels, target_lengths) in enumerate(progress_bar):
                 images = images.to(self.device)
                 labels = labels.to(self.device)
 
