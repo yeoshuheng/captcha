@@ -1,3 +1,9 @@
+"""
+Complete CAPTCHA Recognition System using CTC Loss
+Usage:
+    python captcha_ctc.py --train_dir ./train --test_dir ./test --epochs 20 --lr 0.001
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,6 +16,7 @@ from tqdm import tqdm
 import argparse
 import os
 
+# Character set for CAPTCHA (alphanumeric)
 CHARSET = string.digits + string.ascii_lowercase + string.ascii_uppercase
 CHAR_TO_IDX = {char: idx + 1 for idx, char in enumerate(CHARSET)}  # 0 reserved for CTC blank
 IDX_TO_CHAR = {idx + 1: char for idx, char in enumerate(CHARSET)}
@@ -241,19 +248,32 @@ def ctc_decode(predictions):
 # Evaluation
 # ============================================================================
 
-def evaluate_model(model, test_loader, device):
+def evaluate_model(model, test_loader, device, debug=False):
     """Evaluate model on test set."""
     model.eval()
     correct = 0
     total = 0
     
     with torch.no_grad():
-        for images, labels_concat, label_lengths in tqdm(test_loader, desc="Evaluating"):
+        for batch_idx, (images, labels_concat, label_lengths) in enumerate(tqdm(test_loader, desc="Evaluating")):
             images = images.to(device)
             
             # Forward pass
             outputs = model(images)
             log_probs = F.log_softmax(outputs, dim=2)
+            
+            # Debug first batch
+            if debug and batch_idx == 0:
+                print(f"\n[DEBUG] Output shape: {outputs.shape}")  # (seq_len, batch, num_classes)
+                print(f"[DEBUG] Log probs shape: {log_probs.shape}")
+                print(f"[DEBUG] Log probs min/max: {log_probs.min():.4f} / {log_probs.max():.4f}")
+                
+                # Check argmax predictions
+                argmax_preds = log_probs.argmax(dim=2)  # (seq_len, batch)
+                print(f"[DEBUG] Argmax shape: {argmax_preds.shape}")
+                print(f"[DEBUG] Unique predictions: {torch.unique(argmax_preds).tolist()[:20]}")
+                print(f"[DEBUG] Blank ratio: {(argmax_preds == 0).float().mean().item():.2%}")
+                print(f"[DEBUG] First sequence (first 20 steps): {argmax_preds[:20, 0].tolist()}")
             
             # Decode predictions
             predictions = ctc_decode(log_probs)
@@ -266,6 +286,12 @@ def evaluate_model(model, test_loader, device):
                 label_str = ''.join([IDX_TO_CHAR[idx.item()] for idx in label_seq])
                 true_labels.append(label_str)
                 start_idx += length
+            
+            # Debug first batch predictions
+            if debug and batch_idx == 0:
+                print(f"\n[DEBUG] Sample predictions vs true labels:")
+                for i, (pred, true) in enumerate(zip(predictions[:5], true_labels[:5])):
+                    print(f"  [{i}] Pred: '{pred}' | True: '{true}' | Match: {pred == true}")
             
             # Calculate accuracy
             for pred, true in zip(predictions, true_labels):
@@ -348,7 +374,7 @@ def main():
         print(f"Train Loss: {train_loss:.4f}")
         
         # Evaluate
-        accuracy, correct, total = evaluate_model(model, test_loader, device)
+        accuracy, correct, total = evaluate_model(model, test_loader, device, debug=(epoch == 1))
         print(f"Test Accuracy: {accuracy:.2f}% ({correct}/{total})")
         
         # Learning rate scheduling
