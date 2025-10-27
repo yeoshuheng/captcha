@@ -16,69 +16,77 @@ from tqdm import tqdm
 import argparse
 import os
 from torch.optim.lr_scheduler import LambdaLR
+import cv2
+import numpy as np
 
+# ============================================================================
 # Character set for CAPTCHA (alphanumeric)
+# ============================================================================
 CHARSET = string.digits + string.ascii_lowercase + string.ascii_uppercase
 CHAR_TO_IDX = {char: idx + 1 for idx, char in enumerate(CHARSET)}  # 0 reserved for CTC blank
 IDX_TO_CHAR = {idx + 1: char for idx, char in enumerate(CHARSET)}
 NUM_CLASSES = len(CHARSET) + 1  # +1 for CTC blank token
 
+# ============================================================================
+# CAPTCHA preprocessing
+# ============================================================================
+class CaptchaPreprocess:
+    def __init__(self, img_height=32, img_width=128):
+        self.img_height = img_height
+        self.img_width = img_width
+        self.normalize = T.Normalize(mean=[0.5], std=[0.5])
+
+    def __call__(self, img):
+        img = np.array(img.convert('RGB'))
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        img = cv2.medianBlur(img, 3)
+        img = cv2.adaptiveThreshold(
+            img, 255,
+            cv2.ADAPTIVE_THRESH_MEAN_C,
+            cv2.THRESH_BINARY_INV,
+            11, 2
+        )
+        kernel = np.ones((2,2), np.uint8)
+        img = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel)
+        img = cv2.resize(img, (self.img_width, self.img_height))
+        img = torch.from_numpy(img).unsqueeze(0).float() / 255.0
+        img = self.normalize(img)
+        return img
 
 # ============================================================================
 # Dataset
 # ============================================================================
-
 class CaptchaDataset(Dataset):
-    """Dataset for CAPTCHA images with labels extracted from filenames."""
-    
     def __init__(self, image_dir, img_height=32, img_width=128):
         self.image_paths = []
         self.labels = []
-        
-        # Load all PNG images and extract labels from filenames
         for path in Path(image_dir).glob("*.png"):
             self.image_paths.append(str(path))
-            # Assuming filename format: "label-xxxxx.png"
-            label = path.stem.split('-')[0]
+            label = path.stem.split('-')[0]  
             self.labels.append(label)
-        
-        self.transform = T.Compose([
-            T.Resize((img_height, img_width)),
-            T.Grayscale(num_output_channels=1),
-            T.ToTensor(),
-            T.Normalize(mean=[0.5], std=[0.5])
-        ])
-    
+        self.transform = CaptchaPreprocess(img_height, img_width)
+
     def __len__(self):
         return len(self.image_paths)
-    
+
     def __getitem__(self, idx):
-        # Load image
-        img = Image.open(self.image_paths[idx]).convert('RGB')
+        img = Image.open(self.image_paths[idx])
         img = self.transform(img)
-        
-        # Convert label to indices
+
         label = self.labels[idx]
         label_indices = torch.tensor([CHAR_TO_IDX[c] for c in label], dtype=torch.long)
-        
+
         return img, label_indices
 
-
+# ============================================================================
+# Collate function for variable-length CTC labels
+# ============================================================================
 def collate_fn(batch):
-    """Collate function for DataLoader to handle variable-length labels."""
     images, labels = zip(*batch)
-    
-    # Stack images
     images = torch.stack(images, dim=0)
-    
-    # Concatenate all labels
     labels_concat = torch.cat(labels)
-    
-    # Get label lengths
     label_lengths = torch.tensor([len(label) for label in labels], dtype=torch.long)
-    
     return images, labels_concat, label_lengths
-
 
 # ============================================================================
 # Model Architecture
