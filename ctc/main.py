@@ -91,54 +91,55 @@ def collate_fn(batch):
 # ============================================================================
 # Model Architecture
 # ============================================================================
-
 class CRNNModel(nn.Module):
     """
-    CRNN architecture for CAPTCHA recognition (less aggressive downsampling).
-    Keeps higher temporal resolution to help CTC alignment.
+    CRNN architecture for CAPTCHA recognition.
+    Preserves horizontal resolution for CTC.
     """
     def __init__(self, num_classes, hidden_size=256):
         super().__init__()
 
         # CNN feature extractor
         self.cnn = nn.Sequential(
-            # Layer 1: 1 -> 64
+            # Conv Block 1
             nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),
-            nn.InstanceNorm2d(64, affine=True),
+            nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),  # H/2, W/2 -> 16x64
+            nn.MaxPool2d(kernel_size=(2,2), stride=(2,2)),  # H/2, W/2
 
-            # Layer 2: 64 -> 128
+            # Conv Block 2
             nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
-            nn.InstanceNorm2d(128, affine=True),
+            nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # H/4, W/2 -> 8x64
+            nn.MaxPool2d(kernel_size=(2,1), stride=(2,1)),  # H/4, W/2
 
-            # Layer 3: 128 -> 256
+            # Conv Block 3
             nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
-            nn.InstanceNorm2d(256, affine=True),
+            nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
+            # Keep width resolution, no horizontal pooling
 
-            # Layer 4: 256 -> 256
+            # Conv Block 4
             nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
-            nn.InstanceNorm2d(256, affine=True),
+            nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # H/8, W/2 -> 4x64
+            nn.MaxPool2d(kernel_size=(2,1), stride=(2,1)),  # H/8, W/2
 
-            # Layer 5: 256 -> 512
+            # Conv Block 5
             nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1),
-            nn.InstanceNorm2d(512, affine=True),
+            nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
 
-            # Layer 6: 512 -> 512
+            # Conv Block 6
             nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
-            nn.InstanceNorm2d(512, affine=True),
+            nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)), 
+            nn.MaxPool2d(kernel_size=(2,1), stride=(2,1)),  # H/16, W/2
         )
 
+        # LSTM expects input shape (seq_len, batch, features)
         self.rnn = nn.LSTM(
-            input_size=512 * 2,  # 1024
+            input_size=512*2,  # height after H/16 = 2, channels=512
             hidden_size=hidden_size,
             num_layers=2,
             bidirectional=True,
@@ -146,7 +147,7 @@ class CRNNModel(nn.Module):
             batch_first=False
         )
 
-        self.fc = nn.Linear(hidden_size * 2, num_classes)
+        self.fc = nn.Linear(hidden_size*2, num_classes)
         self._initialize_weights()
 
     def _initialize_weights(self):
@@ -155,7 +156,7 @@ class CRNNModel(nn.Module):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.InstanceNorm2d):
+            elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Linear):
@@ -163,12 +164,13 @@ class CRNNModel(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        conv_features = self.cnn(x)             # (batch, 512, 2, 64)
+        conv_features = self.cnn(x)  # (batch, channels, H, W)
         batch, channels, height, width = conv_features.size()
-        conv_features = conv_features.permute(3, 0, 1, 2)  # (width, batch, channels, height)
-        conv_features = conv_features.reshape(width, batch, channels * height)
+        # Flatten H into feature dimension
+        conv_features = conv_features.permute(3, 0, 1, 2)  # (W, batch, C, H)
+        conv_features = conv_features.reshape(width, batch, channels*height)
         rnn_out, _ = self.rnn(conv_features)
-        output = self.fc(rnn_out)               # (seq_len=width, batch, num_classes)
+        output = self.fc(rnn_out)  # (seq_len=W, batch, num_classes)
         return output
 
 
@@ -399,11 +401,11 @@ def main():
         print(f"{'='*60}")
         
         # Train
-        train_loss = train_model(model, train_loader, criterion, optimizer, device, epoch, debug=(epoch == 1))
+        train_loss = train_model(model, train_loader, criterion, optimizer, device, epoch, debug=(epoch % 10 == 0))
         print(f"Train Loss: {train_loss:.4f}")
         
         # Evaluate
-        accuracy, correct, total = evaluate_model(model, test_loader, device, debug=(epoch == 1))
+        accuracy, correct, total = evaluate_model(model, test_loader, device, debug=(epoch % 10 == 0))
         print(f"Test Accuracy: {accuracy:.2f}% ({correct}/{total})")
         
         # Learning rate scheduling
