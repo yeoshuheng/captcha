@@ -15,6 +15,7 @@ import torchvision.transforms as T
 from tqdm import tqdm
 import argparse
 import os
+from torch.optim.lr_scheduler import LambdaLR
 
 # Character set for CAPTCHA (alphanumeric)
 CHARSET = string.digits + string.ascii_lowercase + string.ascii_uppercase
@@ -95,44 +96,38 @@ class CRNNModel(nn.Module):
         self.cnn = nn.Sequential(
             # Layer 1: 1 -> 64
             nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(64),
+            nn.InstanceNorm2d(64, affine=True),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2),  # H/2, W/2 -> 16x64
 
             # Layer 2: 64 -> 128
             nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(128),
+            nn.InstanceNorm2d(128, affine=True),
             nn.ReLU(inplace=True),
-            # ✅ Reduce pooling on width: (2,1) instead of (2,2)
             nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # H/4, W/2 -> 8x64
 
             # Layer 3: 128 -> 256
             nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(256),
+            nn.InstanceNorm2d(256, affine=True),
             nn.ReLU(inplace=True),
 
             # Layer 4: 256 -> 256
             nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(256),
+            nn.InstanceNorm2d(256, affine=True),
             nn.ReLU(inplace=True),
-            # ✅ Only pool vertically, keep full width
             nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # H/8, W/2 -> 4x64
 
             # Layer 5: 256 -> 512
             nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(512),
+            nn.InstanceNorm2d(512, affine=True),
             nn.ReLU(inplace=True),
 
             # Layer 6: 512 -> 512
             nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(512),
+            nn.InstanceNorm2d(512, affine=True),
             nn.ReLU(inplace=True),
-            # ✅ Pool vertically again, not horizontally
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # H/16, W/2 -> 2x64
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)), 
         )
-
-        # Output feature map: (batch, 512, 2, 64)
-        # → 64 timesteps, 1024-dim features (512 × 2)
 
         self.rnn = nn.LSTM(
             input_size=512 * 2,  # 1024
@@ -152,7 +147,7 @@ class CRNNModel(nn.Module):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
+            elif isinstance(m, nn.InstanceNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Linear):
@@ -266,7 +261,7 @@ def ctc_decode(predictions):
 # Evaluation
 # ============================================================================
 
-def evaluate_model(model, test_loader, device, temperature=1.5, debug=False):
+def evaluate_model(model, test_loader, device, debug=False):
     """Evaluate model on test set."""
     model.eval()
     correct = 0
@@ -278,7 +273,7 @@ def evaluate_model(model, test_loader, device, temperature=1.5, debug=False):
             
             # Forward pass
             outputs = model(images)
-            log_probs = F.log_softmax(outputs / temperature, dim=2)
+            log_probs = F.log_softmax(outputs, dim=2)
             
             # Debug first batch
             if debug and batch_idx == 0:
@@ -320,6 +315,14 @@ def evaluate_model(model, test_loader, device, temperature=1.5, debug=False):
     accuracy = 100 * correct / total
     return accuracy, correct, total
 
+def get_linear_warmup_scheduler(optimizer, warmup_steps, total_steps):
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        return max(
+            0.0, float(total_steps - current_step) / float(max(1, total_steps - warmup_steps))
+        )
+    return LambdaLR(optimizer, lr_lambda)
 
 # ============================================================================
 # Main Training Script
@@ -375,9 +378,9 @@ def main():
     # Loss and optimizer
     criterion = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3
-    )
+    total_steps = len(train_loader) * args.epochs
+    warmup_steps = int(0.05 * total_steps)
+    scheduler = get_linear_warmup_scheduler(optimizer, warmup_steps, total_steps)
     
     # Training loop
     best_accuracy = 0.0
