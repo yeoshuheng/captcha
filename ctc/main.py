@@ -91,59 +91,43 @@ def collate_fn(batch):
 # ============================================================================
 # Model Architecture
 # ============================================================================
-class CRNNModel(nn.Module):
+import torch
+import torch.nn as nn
+
+class SmallCRNNModel(nn.Module):
     """
-    CRNN architecture for CAPTCHA recognition.
-    Preserves horizontal resolution for CTC.
+    Smaller CRNN for CAPTCHA recognition.
     """
-    def __init__(self, num_classes, hidden_size=256):
+    def __init__(self, num_classes, hidden_size=128):
         super().__init__()
 
-        # CNN feature extractor
+        # CNN feature extractor (smaller channels)
         self.cnn = nn.Sequential(
             # Conv Block 1
-            nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=(2,2), stride=(2,2)),  # H/2, W/2
 
             # Conv Block 2
-            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(128),
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=(2,1), stride=(2,1)),  # H/4, W/2
 
             # Conv Block 3
-            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            # Keep width resolution, no horizontal pooling
-
-            # Conv Block 4
-            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(256),
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=(2,1), stride=(2,1)),  # H/8, W/2
-
-            # Conv Block 5
-            nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-
-            # Conv Block 6
-            nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2,1), stride=(2,1)),  # H/16, W/2
         )
 
         # LSTM expects input shape (seq_len, batch, features)
         self.rnn = nn.LSTM(
-            input_size=512*2,  # height after H/16 = 2, channels=512
+            input_size=128*2,  # assuming height after H/8 = 2, channels=128
             hidden_size=hidden_size,
-            num_layers=2,
+            num_layers=1,  # smaller
             bidirectional=True,
-            dropout=0.3,
             batch_first=False
         )
 
@@ -166,12 +150,12 @@ class CRNNModel(nn.Module):
     def forward(self, x):
         conv_features = self.cnn(x)  # (batch, channels, H, W)
         batch, channels, height, width = conv_features.size()
-        # Flatten H into feature dimension
         conv_features = conv_features.permute(3, 0, 1, 2)  # (W, batch, C, H)
         conv_features = conv_features.reshape(width, batch, channels*height)
         rnn_out, _ = self.rnn(conv_features)
         output = self.fc(rnn_out)  # (seq_len=W, batch, num_classes)
         return output
+
 
 
 # ============================================================================
