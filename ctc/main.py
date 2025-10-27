@@ -85,57 +85,55 @@ def collate_fn(batch):
 
 class CRNNModel(nn.Module):
     """
-    CRNN architecture for CAPTCHA recognition:
-    - CNN for feature extraction
-    - RNN for sequence modeling
-    - Fully connected layer for classification
+    CRNN architecture for CAPTCHA recognition (less aggressive downsampling).
+    Keeps higher temporal resolution to help CTC alignment.
     """
-    
     def __init__(self, num_classes, hidden_size=256):
         super().__init__()
-        
-        # CNN layers for feature extraction
+
+        # CNN feature extractor
         self.cnn = nn.Sequential(
             # Layer 1: 1 -> 64
             nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2),  # H/2, W/2 -> 16x64
-            
+
             # Layer 2: 64 -> 128
             nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),  # H/4, W/4 -> 8x32
-            
+            # ✅ Reduce pooling on width: (2,1) instead of (2,2)
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # H/4, W/2 -> 8x64
+
             # Layer 3: 128 -> 256
             nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
-            
+
             # Layer 4: 256 -> 256
             nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 1)),  # H/8, W/4 -> 4x32
-            
+            # ✅ Only pool vertically, keep full width
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # H/8, W/2 -> 4x64
+
             # Layer 5: 256 -> 512
             nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
-            
+
             # Layer 6: 512 -> 512
             nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 1)),  # H/16, W/4 -> 2x32
+            # ✅ Pool vertically again, not horizontally
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # H/16, W/2 -> 2x64
         )
-        
-        # Map pooling to calculate actual feature dimensions
-        # Input: 32x128 -> after pooling: 2x32
-        # Feature size: 512 channels * 2 height = 1024
-        
-        # Bidirectional LSTM
+
+        # Output feature map: (batch, 512, 2, 64)
+        # → 64 timesteps, 1024-dim features (512 × 2)
+
         self.rnn = nn.LSTM(
             input_size=512 * 2,  # 1024
             hidden_size=hidden_size,
@@ -144,15 +142,11 @@ class CRNNModel(nn.Module):
             dropout=0.3,
             batch_first=False
         )
-        
-        # Fully connected layer
+
         self.fc = nn.Linear(hidden_size * 2, num_classes)
-        
-        # Initialize weights properly
         self._initialize_weights()
-    
+
     def _initialize_weights(self):
-        """Proper weight initialization is crucial for CTC training."""
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -164,27 +158,14 @@ class CRNNModel(nn.Module):
             elif isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, 0, 0.01)
                 nn.init.constant_(m.bias, 0)
-    
+
     def forward(self, x):
-        # CNN feature extraction
-        # Input: (batch, 1, 32, 128)
-        conv_features = self.cnn(x)
-        # Output: (batch, 512, 2, 32)
-        
+        conv_features = self.cnn(x)             # (batch, 512, 2, 64)
         batch, channels, height, width = conv_features.size()
-        
-        # Reshape for RNN: (batch, channels, height, width) -> (width, batch, channels*height)
         conv_features = conv_features.permute(3, 0, 1, 2)  # (width, batch, channels, height)
         conv_features = conv_features.reshape(width, batch, channels * height)
-        
-        # RNN sequence modeling
         rnn_out, _ = self.rnn(conv_features)
-        # Output: (seq_len, batch, hidden_size*2)
-        
-        # Fully connected layer
-        output = self.fc(rnn_out)
-        # Output: (seq_len, batch, num_classes)
-        
+        output = self.fc(rnn_out)               # (seq_len=width, batch, num_classes)
         return output
 
 
@@ -285,7 +266,7 @@ def ctc_decode(predictions):
 # Evaluation
 # ============================================================================
 
-def evaluate_model(model, test_loader, device, debug=False):
+def evaluate_model(model, test_loader, device, temperature=1.5, debug=False):
     """Evaluate model on test set."""
     model.eval()
     correct = 0
@@ -297,7 +278,7 @@ def evaluate_model(model, test_loader, device, debug=False):
             
             # Forward pass
             outputs = model(images)
-            log_probs = F.log_softmax(outputs, dim=2)
+            log_probs = F.log_softmax(outputs / temperature, dim=2)
             
             # Debug first batch
             if debug and batch_idx == 0:
@@ -415,7 +396,8 @@ def main():
         print(f"Test Accuracy: {accuracy:.2f}% ({correct}/{total})")
         
         # Learning rate scheduling
-        scheduler.step(train_loss)
+        if epoch >= 10:
+            scheduler.step(train_loss)
         
         # Save checkpoint
         if epoch % 5 == 0:
