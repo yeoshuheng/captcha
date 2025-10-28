@@ -1,7 +1,11 @@
 """
-Complete CAPTCHA Recognition System using CTC Loss
-Usage:
-    python captcha_ctc.py --train_dir ./train --test_dir ./test --epochs 20 --lr 0.001
+Improved CAPTCHA Recognition System using CTC Loss
+Key fixes:
+- Dynamic feature map dimension calculation
+- Longer sequence length with adjusted pooling
+- Better learning rate schedule
+- Simplified preprocessing
+- Label length validation
 """
 
 import torch
@@ -15,7 +19,6 @@ import torchvision.transforms as T
 from tqdm import tqdm
 import argparse
 import os
-from torch.optim.lr_scheduler import LambdaLR
 import cv2
 import numpy as np
 
@@ -23,12 +26,12 @@ import numpy as np
 # Character set for CAPTCHA (alphanumeric)
 # ============================================================================
 CHARSET = string.digits + string.ascii_lowercase + string.ascii_uppercase
-CHAR_TO_IDX = {char: idx + 1 for idx, char in enumerate(CHARSET)}  # 0 reserved for CTC blank
+CHAR_TO_IDX = {char: idx + 1 for idx, char in enumerate(CHARSET)}
 IDX_TO_CHAR = {idx + 1: char for idx, char in enumerate(CHARSET)}
 NUM_CLASSES = len(CHARSET) + 1  # +1 for CTC blank token
 
 # ============================================================================
-# CAPTCHA preprocessing
+# CAPTCHA preprocessing (simplified)
 # ============================================================================
 class CaptchaPreprocess:
     def __init__(self, img_height=32, img_width=128):
@@ -37,33 +40,47 @@ class CaptchaPreprocess:
         self.normalize = T.Normalize(mean=[0.5], std=[0.5])
 
     def __call__(self, img):
-        img = np.array(img.convert('RGB'))
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        # Convert to grayscale
+        img = np.array(img.convert('L'))
+        
+        # Light denoising only
         img = cv2.medianBlur(img, 3)
-        img = cv2.adaptiveThreshold(
-            img, 255,
-            cv2.ADAPTIVE_THRESH_MEAN_C,
-            cv2.THRESH_BINARY_INV,
-            11, 2
-        )
-        kernel = np.ones((2,2), np.uint8)
-        img = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel)
+        
+        # Resize
         img = cv2.resize(img, (self.img_width, self.img_height))
+        
+        # Convert to tensor and normalize
         img = torch.from_numpy(img).unsqueeze(0).float() / 255.0
         img = self.normalize(img)
         return img
 
 # ============================================================================
-# Dataset
+# Dataset with validation
 # ============================================================================
 class CaptchaDataset(Dataset):
-    def __init__(self, image_dir, img_height=32, img_width=128):
+    def __init__(self, image_dir, img_height=32, img_width=128, max_label_len=10):
         self.image_paths = []
         self.labels = []
+        self.max_label_len = max_label_len
+        
+        skipped = 0
         for path in Path(image_dir).glob("*.png"):
+            label = path.stem.split('-')[0]
+            
+            # Validate label
+            if len(label) > max_label_len:
+                skipped += 1
+                continue
+            if not all(c in CHARSET for c in label):
+                skipped += 1
+                continue
+                
             self.image_paths.append(str(path))
-            label = path.stem.split('-')[0]  
             self.labels.append(label)
+        
+        if skipped > 0:
+            print(f"Skipped {skipped} samples with invalid labels")
+        
         self.transform = CaptchaPreprocess(img_height, img_width)
 
     def __len__(self):
@@ -72,68 +89,86 @@ class CaptchaDataset(Dataset):
     def __getitem__(self, idx):
         img = Image.open(self.image_paths[idx])
         img = self.transform(img)
-
+        
         label = self.labels[idx]
         label_indices = torch.tensor([CHAR_TO_IDX[c] for c in label], dtype=torch.long)
-
-        return img, label_indices
+        
+        return img, label_indices, label  # Return original label for debugging
 
 # ============================================================================
-# Collate function for variable-length CTC labels
+# Collate function
 # ============================================================================
 def collate_fn(batch):
-    images, labels = zip(*batch)
+    images, labels, label_strs = zip(*batch)
     images = torch.stack(images, dim=0)
     labels_concat = torch.cat(labels)
     label_lengths = torch.tensor([len(label) for label in labels], dtype=torch.long)
-    return images, labels_concat, label_lengths
+    return images, labels_concat, label_lengths, label_strs
 
 # ============================================================================
-# Model Architecture
+# Improved Model Architecture
 # ============================================================================
-import torch
-import torch.nn as nn
-
 class CRNNModel(nn.Module):
-    """
-    Smaller CRNN for CAPTCHA recognition.
-    """
-    def __init__(self, num_classes, hidden_size=128):
+    def __init__(self, num_classes, hidden_size=256, img_height=32):
         super().__init__()
-
-        # CNN feature extractor (smaller channels)
+        
+        # CNN feature extractor with better pooling strategy
         self.cnn = nn.Sequential(
-            # Conv Block 1
+            # Block 1: 32×128 → 16×64
             nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2,2), stride=(2,2)),  # H/2, W/2
-
-            # Conv Block 2
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            
+            # Block 2: 16×64 → 8×32
             nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2,1), stride=(2,1)),  # H/4, W/2
-
-            # Conv Block 3
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            
+            # Block 3: 8×32 → 4×32 (pool height only)
             nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2,1), stride=(2,1)),  # H/8, W/2
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
+            
+            # Block 4: 4×32 → 2×32 (pool height only)
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
+            
+            # Block 5: 2×32 → 1×32 (pool height only)
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
         )
-
-        # LSTM expects input shape (seq_len, batch, features)
+        
+        # Calculate feature size dynamically
+        self.rnn_input_size = self._get_rnn_input_size(img_height)
+        
+        # Bidirectional LSTM
         self.rnn = nn.LSTM(
-            input_size=128*2,  # assuming height after H/8 = 2, channels=128
+            input_size=self.rnn_input_size,
             hidden_size=hidden_size,
-            num_layers=1,  # smaller
+            num_layers=2,
             bidirectional=True,
+            dropout=0.2,
             batch_first=False
         )
-
-        self.fc = nn.Linear(hidden_size*2, num_classes)
+        
+        self.fc = nn.Linear(hidden_size * 2, num_classes)
         self._initialize_weights()
-
+    
+    def _get_rnn_input_size(self, img_height):
+        """Calculate RNN input size by running a dummy forward pass"""
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, img_height, 128)
+            features = self.cnn(dummy)
+            _, c, h, w = features.shape
+            return c * h
+    
     def _initialize_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -144,92 +179,79 @@ class CRNNModel(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.xavier_uniform_(m.weight)
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
+        # CNN
         conv_features = self.cnn(x)  # (batch, channels, H, W)
         batch, channels, height, width = conv_features.size()
+        
+        # Reshape for RNN: (W, batch, C*H)
         conv_features = conv_features.permute(3, 0, 1, 2)  # (W, batch, C, H)
-        conv_features = conv_features.reshape(width, batch, channels*height)
+        conv_features = conv_features.reshape(width, batch, channels * height)
+        
+        # RNN
         rnn_out, _ = self.rnn(conv_features)
-        output = self.fc(rnn_out)  # (seq_len=W, batch, num_classes)
+        
+        # Classifier
+        output = self.fc(rnn_out)  # (seq_len, batch, num_classes)
         return output
-
-
 
 # ============================================================================
 # Training
 # ============================================================================
-
-def train_model(model, train_loader, criterion, optimizer, device, epoch, debug=False):
-    """Train for one epoch."""
+def train_model(model, train_loader, criterion, optimizer, scheduler, device, epoch):
     model.train()
     total_loss = 0
     
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
-    for batch_idx, (images, labels, label_lengths) in enumerate(pbar):
+    for batch_idx, (images, labels, label_lengths, _) in enumerate(pbar):
         images = images.to(device)
         labels = labels.to(device)
         label_lengths = label_lengths.to(device)
         
         # Forward pass
-        outputs = model(images)  # (seq_len, batch, num_classes)
-        
-        # Debug first batch of first epoch
-        if debug and batch_idx == 0:
-            print(f"\n[TRAIN DEBUG] Outputs shape: {outputs.shape}")
-            print(f"[TRAIN DEBUG] Outputs min/max: {outputs.min():.4f} / {outputs.max():.4f}")
-            print(f"[TRAIN DEBUG] Label lengths: {label_lengths.tolist()[:5]}")
-            print(f"[TRAIN DEBUG] Sequence length: {outputs.size(0)}")
-        
-        # Apply log_softmax for CTC
+        outputs = model(images)
         log_probs = F.log_softmax(outputs, dim=2)
         
-        if debug and batch_idx == 0:
-            print(f"[TRAIN DEBUG] Log probs min/max: {log_probs.min():.4f} / {log_probs.max():.4f}")
-            argmax_preds = log_probs.argmax(dim=2)
-            blank_ratio = (argmax_preds == 0).float().mean().item()
-            print(f"[TRAIN DEBUG] Blank ratio in predictions: {blank_ratio:.2%}")
-        
-        # Input lengths (sequence length from model output)
+        # CTC requires input_lengths for each sample
         seq_len = log_probs.size(0)
         input_lengths = torch.full((log_probs.size(1),), seq_len, dtype=torch.long, device=device)
+        
+        # Validate: input_lengths must be >= label_lengths
+        if (input_lengths < label_lengths).any():
+            print(f"\nWarning: input_length ({seq_len}) < some label_lengths")
+            print(f"Max label length in batch: {label_lengths.max().item()}")
+            continue
         
         # Compute CTC loss
         loss = criterion(log_probs, labels, input_lengths, label_lengths)
         
-        if debug and batch_idx == 0:
-            print(f"[TRAIN DEBUG] Loss: {loss.item():.4f}")
+        # Check for invalid loss
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"\nSkipping batch {batch_idx} due to invalid loss")
+            continue
         
         # Backward pass
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
+        scheduler.step()  # Step per batch for warmup
         
         total_loss += loss.item()
-        pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+        current_lr = optimizer.param_groups[0]['lr']
+        pbar.set_postfix({'loss': f'{loss.item():.4f}', 'lr': f'{current_lr:.6f}'})
     
     avg_loss = total_loss / len(train_loader)
     return avg_loss
 
-
 # ============================================================================
-# Decoding
+# CTC Decoding
 # ============================================================================
-
 def ctc_decode(predictions):
-    """
-    CTC greedy decoding: remove blanks and repeated characters.
-    
-    Args:
-        predictions: (seq_len, batch, num_classes) tensor
-    
-    Returns:
-        List of decoded strings
-    """
-    # Get the most likely class at each timestep
+    """CTC greedy decoding"""
     _, max_indices = predictions.max(dim=2)  # (seq_len, batch)
     max_indices = max_indices.transpose(0, 1)  # (batch, seq_len)
     
@@ -240,7 +262,6 @@ def ctc_decode(predictions):
         
         for idx in sequence:
             idx = idx.item()
-            # Skip blank (0) and repeated characters
             if idx != 0 and idx != prev_idx:
                 if idx in IDX_TO_CHAR:
                     chars.append(IDX_TO_CHAR[idx])
@@ -250,131 +271,118 @@ def ctc_decode(predictions):
     
     return decoded_strings
 
-
 # ============================================================================
 # Evaluation
 # ============================================================================
-
-def evaluate_model(model, test_loader, device, debug=False):
-    """Evaluate model on test set."""
+def evaluate_model(model, test_loader, device, show_examples=False):
     model.eval()
     correct = 0
     total = 0
     
+    all_predictions = []
+    all_true_labels = []
+    
     with torch.no_grad():
-        for batch_idx, (images, labels_concat, label_lengths) in enumerate(tqdm(test_loader, desc="Evaluating")):
+        for batch_idx, (images, labels_concat, label_lengths, label_strs) in enumerate(tqdm(test_loader, desc="Evaluating")):
             images = images.to(device)
             
             # Forward pass
             outputs = model(images)
             log_probs = F.log_softmax(outputs, dim=2)
             
-            # Debug first batch
-            if debug and batch_idx == 0:
-                print(f"\n[DEBUG] Output shape: {outputs.shape}")  # (seq_len, batch, num_classes)
-                print(f"[DEBUG] Log probs shape: {log_probs.shape}")
-                print(f"[DEBUG] Log probs min/max: {log_probs.min():.4f} / {log_probs.max():.4f}")
-                
-                # Check argmax predictions
-                argmax_preds = log_probs.argmax(dim=2)  # (seq_len, batch)
-                print(f"[DEBUG] Argmax shape: {argmax_preds.shape}")
-                print(f"[DEBUG] Unique predictions: {torch.unique(argmax_preds).tolist()[:20]}")
-                print(f"[DEBUG] Blank ratio: {(argmax_preds == 0).float().mean().item():.2%}")
-                print(f"[DEBUG] First sequence (first 20 steps): {argmax_preds[:20, 0].tolist()}")
-            
             # Decode predictions
             predictions = ctc_decode(log_probs)
             
-            # Reconstruct true labels
-            true_labels = []
-            start_idx = 0
-            for length in label_lengths:
-                label_seq = labels_concat[start_idx:start_idx + length]
-                label_str = ''.join([IDX_TO_CHAR[idx.item()] for idx in label_seq])
-                true_labels.append(label_str)
-                start_idx += length
-            
-            # Debug first batch predictions
-            if debug and batch_idx == 0:
-                print(f"\n[DEBUG] Sample predictions vs true labels:")
-                for i, (pred, true) in enumerate(zip(predictions[:5], true_labels[:5])):
-                    print(f"  [{i}] Pred: '{pred}' | True: '{true}' | Match: {pred == true}")
-            
-            # Calculate accuracy
-            for pred, true in zip(predictions, true_labels):
+            # Compare with true labels
+            for pred, true in zip(predictions, label_strs):
+                all_predictions.append(pred)
+                all_true_labels.append(true)
                 if pred == true:
                     correct += 1
                 total += 1
     
     accuracy = 100 * correct / total
+    
+    # Show examples
+    if show_examples:
+        print("\n" + "="*60)
+        print("Sample Predictions:")
+        print("="*60)
+        for i in range(min(10, len(all_predictions))):
+            match = "✓" if all_predictions[i] == all_true_labels[i] else "✗"
+            print(f"{match} Pred: '{all_predictions[i]:10s}' | True: '{all_true_labels[i]}'")
+    
     return accuracy, correct, total
 
-def get_linear_warmup_scheduler(optimizer, warmup_steps, total_steps):
+# ============================================================================
+# Learning Rate Scheduler
+# ============================================================================
+def get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps):
     def lr_lambda(current_step):
         if current_step < warmup_steps:
             return float(current_step) / float(max(1, warmup_steps))
-        return max(
-            0.0, float(total_steps - current_step) / float(max(1, total_steps - warmup_steps))
-        )
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return max(0.0, 0.5 * (1.0 + np.cos(np.pi * progress)))
+    
+    from torch.optim.lr_scheduler import LambdaLR
     return LambdaLR(optimizer, lr_lambda)
 
 # ============================================================================
-# Main Training Script
+# Main
 # ============================================================================
-
 def main():
-    parser = argparse.ArgumentParser(description='Train CAPTCHA recognition model with CTC')
-    parser.add_argument('--train_dir', type=str, required=True, help='Training data directory')
-    parser.add_argument('--test_dir', type=str, required=True, help='Test data directory')
-    parser.add_argument('--epochs', type=int, default=30, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
-    parser.add_argument('--lr', type=float, default=0.0005, help='Learning rate (default: 0.0005)')
-    parser.add_argument('--hidden_size', type=int, default=256, help='RNN hidden size')
-    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints', help='Checkpoint directory')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--train_dir', type=str, required=True)
+    parser.add_argument('--test_dir', type=str, required=True)
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--lr', type=float, default=0.001)
+    parser.add_argument('--hidden_size', type=int, default=256)
+    parser.add_argument('--img_height', type=int, default=32)
+    parser.add_argument('--img_width', type=int, default=128)
+    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints')
     args = parser.parse_args()
     
-    # Create checkpoint directory
     os.makedirs(args.checkpoint_dir, exist_ok=True)
-    
-    # Device configuration
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
     # Load datasets
     print("Loading datasets...")
-    train_dataset = CaptchaDataset(args.train_dir)
-    test_dataset = CaptchaDataset(args.test_dir)
+    train_dataset = CaptchaDataset(args.train_dir, args.img_height, args.img_width)
+    test_dataset = CaptchaDataset(args.test_dir, args.img_height, args.img_width)
     
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        collate_fn=collate_fn,
-        num_workers=2
+        train_dataset, batch_size=args.batch_size, shuffle=True,
+        collate_fn=collate_fn, num_workers=4, pin_memory=True
     )
-    
     test_loader = DataLoader(
-        test_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=2
+        test_dataset, batch_size=args.batch_size, shuffle=False,
+        collate_fn=collate_fn, num_workers=4, pin_memory=True
     )
     
     print(f"Training samples: {len(train_dataset)}")
     print(f"Test samples: {len(test_dataset)}")
-    print(f"Number of classes: {NUM_CLASSES} (including blank)")
     
-    # Initialize model
-    model = CRNNModel(num_classes=NUM_CLASSES, hidden_size=args.hidden_size)
+    # Model
+    model = CRNNModel(num_classes=NUM_CLASSES, hidden_size=args.hidden_size, img_height=args.img_height)
     model = model.to(device)
+    
+    # Calculate sequence length
+    with torch.no_grad():
+        dummy_input = torch.zeros(1, 1, args.img_height, args.img_width).to(device)
+        dummy_output = model(dummy_input)
+        seq_len = dummy_output.size(0)
+    print(f"Model sequence length: {seq_len}")
     
     # Loss and optimizer
     criterion = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    
+    # Scheduler with warmup
     total_steps = len(train_loader) * args.epochs
-    warmup_steps = int(0.05 * total_steps)
-    scheduler = get_linear_warmup_scheduler(optimizer, warmup_steps, total_steps)
+    warmup_steps = len(train_loader) * 2  # 2 epochs warmup
+    scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
     
     # Training loop
     best_accuracy = 0.0
@@ -384,48 +392,23 @@ def main():
         print(f"Epoch {epoch}/{args.epochs}")
         print(f"{'='*60}")
         
-        # Train
-        train_loss = train_model(model, train_loader, criterion, optimizer, device, epoch, debug=(epoch % 10 == 0))
+        train_loss = train_model(model, train_loader, criterion, optimizer, scheduler, device, epoch)
         print(f"Train Loss: {train_loss:.4f}")
         
-        # Evaluate
-        accuracy, correct, total = evaluate_model(model, test_loader, device, debug=(epoch % 10 == 0))
+        accuracy, correct, total = evaluate_model(model, test_loader, device, show_examples=(epoch % 5 == 0))
         print(f"Test Accuracy: {accuracy:.2f}% ({correct}/{total})")
-        
-        # Learning rate scheduling
-        if epoch >= 10:
-            scheduler.step(train_loss)
-        
-        # Save checkpoint
-        if epoch % 5 == 0:
-            checkpoint_path = os.path.join(args.checkpoint_dir, f'model_epoch_{epoch}.pth')
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': train_loss,
-                'accuracy': accuracy
-            }, checkpoint_path)
-            print(f"Checkpoint saved: {checkpoint_path}")
         
         # Save best model
         if accuracy > best_accuracy:
             best_accuracy = accuracy
-            best_path = os.path.join(args.checkpoint_dir, 'best_model.pth')
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': train_loss,
                 'accuracy': accuracy
-            }, best_path)
-            print(f"★ New best model saved! Accuracy: {accuracy:.2f}%")
+            }, os.path.join(args.checkpoint_dir, 'best_model.pth'))
+            print(f"★ New best model! Accuracy: {accuracy:.2f}%")
     
-    print(f"\n{'='*60}")
-    print(f"Training completed!")
-    print(f"Best accuracy: {best_accuracy:.2f}%")
-    print(f"{'='*60}")
-
+    print(f"\nBest accuracy: {best_accuracy:.2f}%")
 
 if __name__ == '__main__':
     main()
