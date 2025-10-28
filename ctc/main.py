@@ -94,7 +94,7 @@ def collate_fn(batch):
 import torch
 import torch.nn as nn
 
-class SmallCRNNModel(nn.Module):
+class CRNNModel(nn.Module):
     """
     Smaller CRNN for CAPTCHA recognition.
     """
