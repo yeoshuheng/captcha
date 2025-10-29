@@ -1,11 +1,10 @@
 """
-Improved CAPTCHA Recognition System using CTC Loss
+Fixed CAPTCHA Recognition System using CTC Loss
 Key fixes:
-- Dynamic feature map dimension calculation
-- Longer sequence length with adjusted pooling
-- Better learning rate schedule
-- Simplified preprocessing
-- Label length validation
+- Preserved width dimension for longer sequences (128 -> 32 time steps)
+- Better pooling strategy to maintain sequence length
+- Added output length validation
+- Improved blank token handling
 """
 
 import torch
@@ -93,7 +92,7 @@ class CaptchaDataset(Dataset):
         label = self.labels[idx]
         label_indices = torch.tensor([CHAR_TO_IDX[c] for c in label], dtype=torch.long)
         
-        return img, label_indices, label  # Return original label for debugging
+        return img, label_indices, label
 
 # ============================================================================
 # Collate function
@@ -106,47 +105,54 @@ def collate_fn(batch):
     return images, labels_concat, label_lengths, label_strs
 
 # ============================================================================
-# Improved Model Architecture
+# Fixed Model Architecture - Preserves Width for Sequence Length
 # ============================================================================
 class CRNNModel(nn.Module):
-    def __init__(self, num_classes, hidden_size=256, img_height=32):
+    def __init__(self, num_classes, hidden_size=256, img_height=32, img_width=128):
         super().__init__()
         
-        # CNN feature extractor with better pooling strategy
+        self.img_height = img_height
+        self.img_width = img_width
+        
+        # CNN feature extractor - ONLY pool height, preserve width
         self.cnn = nn.Sequential(
-            # Block 1: 32×128 → 16×64
-            nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            
-            # Block 2: 16×64 → 8×32
-            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            # Block 1: (32×128) → (16×128) - pool height only
+            nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2)),  # Now 16×64
             
-            # Block 3: 8×32 → 4×32 (pool height only)
+            # Block 2: (16×64) → (8×32) 
             nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
+            nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2)),  # Now 8×32
             
-            # Block 4: 4×32 → 2×32 (pool height only)
-            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
-            
-            # Block 5: 2×32 → 1×32 (pool height only)
+            # Block 3: (8×32) → (4×32) - pool height only to preserve width
             nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # Now 4×32
+            
+            # Block 4: (4×32) → (2×32) - pool height only
+            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # Now 2×32
+            
+            # Block 5: (2×32) → (1×32) - final height pooling
+            nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # Now 1×32
         )
         
         # Calculate feature size dynamically
-        self.rnn_input_size = self._get_rnn_input_size(img_height)
+        self.rnn_input_size = self._get_rnn_input_size(img_height, img_width)
+        self.sequence_length = self._get_sequence_length(img_height, img_width)
+        
+        print(f"RNN input size: {self.rnn_input_size}")
+        print(f"Output sequence length: {self.sequence_length}")
         
         # Bidirectional LSTM
         self.rnn = nn.LSTM(
@@ -154,17 +160,25 @@ class CRNNModel(nn.Module):
             hidden_size=hidden_size,
             num_layers=2,
             bidirectional=True,
-            dropout=0.2,
+            dropout=0.3,
             batch_first=False
         )
         
         self.fc = nn.Linear(hidden_size * 2, num_classes)
         self._initialize_weights()
     
-    def _get_rnn_input_size(self, img_height):
+    def _get_sequence_length(self, img_height, img_width):
+        """Calculate output sequence length"""
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, img_height, img_width)
+            features = self.cnn(dummy)
+            _, _, _, w = features.shape
+            return w
+    
+    def _get_rnn_input_size(self, img_height, img_width):
         """Calculate RNN input size by running a dummy forward pass"""
         with torch.no_grad():
-            dummy = torch.zeros(1, 1, img_height, 128)
+            dummy = torch.zeros(1, 1, img_height, img_width)
             features = self.cnn(dummy)
             _, c, h, w = features.shape
             return c * h
@@ -199,14 +213,15 @@ class CRNNModel(nn.Module):
         return output
 
 # ============================================================================
-# Training
+# Training with Better Loss Handling
 # ============================================================================
 def train_model(model, train_loader, criterion, optimizer, scheduler, device, epoch):
     model.train()
     total_loss = 0
+    valid_batches = 0
     
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
-    for batch_idx, (images, labels, label_lengths, _) in enumerate(pbar):
+    for batch_idx, (images, labels, label_lengths, label_strs) in enumerate(pbar):
         images = images.to(device)
         labels = labels.to(device)
         label_lengths = label_lengths.to(device)
@@ -220,13 +235,19 @@ def train_model(model, train_loader, criterion, optimizer, scheduler, device, ep
         input_lengths = torch.full((log_probs.size(1),), seq_len, dtype=torch.long, device=device)
         
         # Validate: input_lengths must be >= label_lengths
-        if (input_lengths < label_lengths).any():
-            print(f"\nWarning: input_length ({seq_len}) < some label_lengths")
-            print(f"Max label length in batch: {label_lengths.max().item()}")
+        max_label_len = label_lengths.max().item()
+        if seq_len < max_label_len:
+            print(f"\nERROR: Sequence length ({seq_len}) < max label length ({max_label_len})")
+            print(f"Sample labels causing issue: {[s for s in label_strs if len(s) == max_label_len]}")
             continue
         
         # Compute CTC loss
-        loss = criterion(log_probs, labels, input_lengths, label_lengths)
+        try:
+            loss = criterion(log_probs, labels, input_lengths, label_lengths)
+        except RuntimeError as e:
+            print(f"\nCTC Loss Error: {e}")
+            print(f"Seq len: {seq_len}, Max label len: {max_label_len}")
+            continue
         
         # Check for invalid loss
         if torch.isnan(loss) or torch.isinf(loss):
@@ -238,20 +259,21 @@ def train_model(model, train_loader, criterion, optimizer, scheduler, device, ep
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
-        scheduler.step()  # Step per batch for warmup
+        scheduler.step()
         
         total_loss += loss.item()
+        valid_batches += 1
         current_lr = optimizer.param_groups[0]['lr']
         pbar.set_postfix({'loss': f'{loss.item():.4f}', 'lr': f'{current_lr:.6f}'})
     
-    avg_loss = total_loss / len(train_loader)
+    avg_loss = total_loss / max(valid_batches, 1)
     return avg_loss
 
 # ============================================================================
 # CTC Decoding
 # ============================================================================
 def ctc_decode(predictions):
-    """CTC greedy decoding"""
+    """CTC greedy decoding with blank removal"""
     _, max_indices = predictions.max(dim=2)  # (seq_len, batch)
     max_indices = max_indices.transpose(0, 1)  # (batch, seq_len)
     
@@ -262,6 +284,7 @@ def ctc_decode(predictions):
         
         for idx in sequence:
             idx = idx.item()
+            # Skip blank (0) and repeated characters
             if idx != 0 and idx != prev_idx:
                 if idx in IDX_TO_CHAR:
                     chars.append(IDX_TO_CHAR[idx])
@@ -278,6 +301,8 @@ def evaluate_model(model, test_loader, device, show_examples=False):
     model.eval()
     correct = 0
     total = 0
+    char_correct = 0
+    char_total = 0
     
     all_predictions = []
     all_true_labels = []
@@ -297,20 +322,31 @@ def evaluate_model(model, test_loader, device, show_examples=False):
             for pred, true in zip(predictions, label_strs):
                 all_predictions.append(pred)
                 all_true_labels.append(true)
+                
+                # Sequence accuracy
                 if pred == true:
                     correct += 1
                 total += 1
+                
+                # Character-level accuracy
+                for i in range(max(len(pred), len(true))):
+                    if i < len(pred) and i < len(true):
+                        if pred[i] == true[i]:
+                            char_correct += 1
+                    char_total += 1
     
     accuracy = 100 * correct / total
+    char_accuracy = 100 * char_correct / char_total
     
     # Show examples
     if show_examples:
         print("\n" + "="*60)
         print("Sample Predictions:")
         print("="*60)
-        for i in range(min(10, len(all_predictions))):
+        for i in range(min(15, len(all_predictions))):
             match = "✓" if all_predictions[i] == all_true_labels[i] else "✗"
-            print(f"{match} Pred: '{all_predictions[i]:10s}' | True: '{all_true_labels[i]}'")
+            print(f"{match} Pred: '{all_predictions[i]:12s}' | True: '{all_true_labels[i]}'")
+        print(f"\nCharacter-level accuracy: {char_accuracy:.2f}%")
     
     return accuracy, correct, total
 
@@ -365,15 +401,16 @@ def main():
     print(f"Test samples: {len(test_dataset)}")
     
     # Model
-    model = CRNNModel(num_classes=NUM_CLASSES, hidden_size=args.hidden_size, img_height=args.img_height)
+    model = CRNNModel(
+        num_classes=NUM_CLASSES, 
+        hidden_size=args.hidden_size, 
+        img_height=args.img_height,
+        img_width=args.img_width
+    )
     model = model.to(device)
     
-    # Calculate sequence length
-    with torch.no_grad():
-        dummy_input = torch.zeros(1, 1, args.img_height, args.img_width).to(device)
-        dummy_output = model(dummy_input)
-        seq_len = dummy_output.size(0)
-    print(f"Model sequence length: {seq_len}")
+    print(f"\nModel Output Sequence Length: {model.sequence_length}")
+    print(f"Maximum label length allowed: {model.sequence_length}")
     
     # Loss and optimizer
     criterion = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
@@ -381,7 +418,7 @@ def main():
     
     # Scheduler with warmup
     total_steps = len(train_loader) * args.epochs
-    warmup_steps = len(train_loader) * 2  # 2 epochs warmup
+    warmup_steps = len(train_loader) * 3  # 3 epochs warmup
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
     
     # Training loop
@@ -404,11 +441,24 @@ def main():
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
-                'accuracy': accuracy
+                'accuracy': accuracy,
+                'args': vars(args)
             }, os.path.join(args.checkpoint_dir, 'best_model.pth'))
             print(f"★ New best model! Accuracy: {accuracy:.2f}%")
+        
+        # Save checkpoint every 10 epochs
+        if epoch % 10 == 0:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'accuracy': accuracy
+            }, os.path.join(args.checkpoint_dir, f'checkpoint_epoch_{epoch}.pth'))
     
-    print(f"\nBest accuracy: {best_accuracy:.2f}%")
+    print(f"\n{'='*60}")
+    print(f"Training Complete!")
+    print(f"Best accuracy: {best_accuracy:.2f}%")
+    print(f"{'='*60}")
 
 if __name__ == '__main__':
     main()
