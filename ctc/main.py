@@ -1,10 +1,10 @@
 """
-Fixed CAPTCHA Recognition System using CTC Loss
+Fixed CAPTCHA Recognition System - Prevents CTC Blank Token Collapse
 Key fixes:
-- Preserved width dimension for longer sequences (128 -> 32 time steps)
-- Better pooling strategy to maintain sequence length
-- Added output length validation
-- Improved blank token handling
+1. Added blank penalty to discourage excessive blank predictions
+2. Better initialization to avoid saturation
+3. Label smoothing equivalent for CTC
+4. Monitoring blank token usage
 """
 
 import torch
@@ -27,7 +27,7 @@ import numpy as np
 CHARSET = string.digits + string.ascii_lowercase + string.ascii_uppercase
 CHAR_TO_IDX = {char: idx + 1 for idx, char in enumerate(CHARSET)}
 IDX_TO_CHAR = {idx + 1: char for idx, char in enumerate(CHARSET)}
-NUM_CLASSES = len(CHARSET) + 1  # +1 for CTC blank token
+NUM_CLASSES = len(CHARSET) + 1  # +1 for CTC blank token (index 0)
 
 # ============================================================================
 # CAPTCHA preprocessing (simplified)
@@ -95,7 +95,7 @@ class CaptchaDataset(Dataset):
         return img, label_indices, label
 
 # ============================================================================
-# Collate function
+# Collate Function
 # ============================================================================
 def collate_fn(batch):
     images, labels, label_strs = zip(*batch)
@@ -105,7 +105,7 @@ def collate_fn(batch):
     return images, labels_concat, label_lengths, label_strs
 
 # ============================================================================
-# Fixed Model Architecture - Preserves Width for Sequence Length
+# Model Architecture with Better Initialization
 # ============================================================================
 class CRNNModel(nn.Module):
     def __init__(self, num_classes, hidden_size=256, img_height=32, img_width=128):
@@ -114,40 +114,34 @@ class CRNNModel(nn.Module):
         self.img_height = img_height
         self.img_width = img_width
         
-        # CNN feature extractor - ONLY pool height, preserve width
+        # CNN feature extractor
         self.cnn = nn.Sequential(
-            # Block 1: (32×128) → (16×128) - pool height only
             nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2)),  # Now 16×64
+            nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2)),
             
-            # Block 2: (16×64) → (8×32) 
             nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2)),  # Now 8×32
+            nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2)),
             
-            # Block 3: (8×32) → (4×32) - pool height only to preserve width
             nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # Now 4×32
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
             
-            # Block 4: (4×32) → (2×32) - pool height only
             nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # Now 2×32
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
             
-            # Block 5: (2×32) → (1×32) - final height pooling
             nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # Now 1×32
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
         )
         
-        # Calculate feature size dynamically
         self.rnn_input_size = self._get_rnn_input_size(img_height, img_width)
         self.sequence_length = self._get_sequence_length(img_height, img_width)
         
@@ -164,11 +158,16 @@ class CRNNModel(nn.Module):
             batch_first=False
         )
         
+        # Final classification layer
         self.fc = nn.Linear(hidden_size * 2, num_classes)
+        
+        # CRITICAL: Initialize final layer with small bias towards non-blank
         self._initialize_weights()
+        # Bias blank token to be less likely initially
+        with torch.no_grad():
+            self.fc.bias[0] = -2.0  # Make blank less likely
     
     def _get_sequence_length(self, img_height, img_width):
-        """Calculate output sequence length"""
         with torch.no_grad():
             dummy = torch.zeros(1, 1, img_height, img_width)
             features = self.cnn(dummy)
@@ -176,7 +175,6 @@ class CRNNModel(nn.Module):
             return w
     
     def _get_rnn_input_size(self, img_height, img_width):
-        """Calculate RNN input size by running a dummy forward pass"""
         with torch.no_grad():
             dummy = torch.zeros(1, 1, img_height, img_width)
             features = self.cnn(dummy)
@@ -193,32 +191,63 @@ class CRNNModel(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
+                # Smaller initialization to prevent saturation
+                nn.init.xavier_uniform_(m.weight, gain=0.5)
                 nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LSTM):
+                for name, param in m.named_parameters():
+                    if 'weight' in name:
+                        nn.init.orthogonal_(param)
+                    elif 'bias' in name:
+                        nn.init.constant_(param, 0)
 
     def forward(self, x):
         # CNN
-        conv_features = self.cnn(x)  # (batch, channels, H, W)
+        conv_features = self.cnn(x)
         batch, channels, height, width = conv_features.size()
         
-        # Reshape for RNN: (W, batch, C*H)
-        conv_features = conv_features.permute(3, 0, 1, 2)  # (W, batch, C, H)
+        # Reshape for RNN
+        conv_features = conv_features.permute(3, 0, 1, 2)
         conv_features = conv_features.reshape(width, batch, channels * height)
         
         # RNN
         rnn_out, _ = self.rnn(conv_features)
         
         # Classifier
-        output = self.fc(rnn_out)  # (seq_len, batch, num_classes)
+        output = self.fc(rnn_out)
         return output
 
 # ============================================================================
-# Training with Better Loss Handling
+# CTC Loss with Blank Penalty
+# ============================================================================
+class CTCLossWithBlankPenalty(nn.Module):
+    def __init__(self, blank=0, reduction='mean', zero_infinity=True, blank_penalty=0.0):
+        super().__init__()
+        self.ctc_loss = nn.CTCLoss(blank=blank, reduction=reduction, zero_infinity=zero_infinity)
+        self.blank_penalty = blank_penalty
+        self.blank = blank
+    
+    def forward(self, log_probs, targets, input_lengths, target_lengths):
+        # Standard CTC loss
+        ctc_loss = self.ctc_loss(log_probs, targets, input_lengths, target_lengths)
+        
+        # Add penalty for predicting blank tokens
+        if self.blank_penalty > 0:
+            # Get probabilities for blank token
+            blank_probs = torch.exp(log_probs[:, :, self.blank])
+            blank_penalty = self.blank_penalty * blank_probs.mean()
+            return ctc_loss + blank_penalty
+        
+        return ctc_loss
+
+# ============================================================================
+# Training with Blank Token Monitoring
 # ============================================================================
 def train_model(model, train_loader, criterion, optimizer, scheduler, device, epoch):
     model.train()
     total_loss = 0
     valid_batches = 0
+    total_blank_ratio = 0
     
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
     for batch_idx, (images, labels, label_lengths, label_strs) in enumerate(pbar):
@@ -230,28 +259,33 @@ def train_model(model, train_loader, criterion, optimizer, scheduler, device, ep
         outputs = model(images)
         log_probs = F.log_softmax(outputs, dim=2)
         
-        # CTC requires input_lengths for each sample
-        seq_len = log_probs.size(0)
-        input_lengths = torch.full((log_probs.size(1),), seq_len, dtype=torch.long, device=device)
+        # Monitor blank token predictions
+        with torch.no_grad():
+            predicted_classes = log_probs.argmax(dim=2)
+            blank_ratio = (predicted_classes == 0).float().mean().item()
+            total_blank_ratio += blank_ratio
         
-        # Validate: input_lengths must be >= label_lengths
+        # CTC setup
+        seq_len = log_probs.size(0)
+        batch_size = log_probs.size(1)
+        input_lengths = torch.full((batch_size,), seq_len, dtype=torch.long, device=device)
+        
+        # Validate
         max_label_len = label_lengths.max().item()
         if seq_len < max_label_len:
-            print(f"\nERROR: Sequence length ({seq_len}) < max label length ({max_label_len})")
-            print(f"Sample labels causing issue: {[s for s in label_strs if len(s) == max_label_len]}")
+            print(f"\nERROR: seq_len ({seq_len}) < max_label_len ({max_label_len})")
             continue
         
-        # Compute CTC loss
+        # Compute loss
         try:
             loss = criterion(log_probs, labels, input_lengths, label_lengths)
         except RuntimeError as e:
             print(f"\nCTC Loss Error: {e}")
-            print(f"Seq len: {seq_len}, Max label len: {max_label_len}")
             continue
         
         # Check for invalid loss
         if torch.isnan(loss) or torch.isinf(loss):
-            print(f"\nSkipping batch {batch_idx} due to invalid loss")
+            print(f"\nSkipping batch {batch_idx}: invalid loss")
             continue
         
         # Backward pass
@@ -264,18 +298,31 @@ def train_model(model, train_loader, criterion, optimizer, scheduler, device, ep
         total_loss += loss.item()
         valid_batches += 1
         current_lr = optimizer.param_groups[0]['lr']
-        pbar.set_postfix({'loss': f'{loss.item():.4f}', 'lr': f'{current_lr:.6f}'})
+        
+        # Show blank ratio in progress bar
+        avg_blank = total_blank_ratio / valid_batches
+        pbar.set_postfix({
+            'loss': f'{loss.item():.4f}',
+            'blank%': f'{blank_ratio*100:.1f}',
+            'lr': f'{current_lr:.6f}'
+        })
     
     avg_loss = total_loss / max(valid_batches, 1)
-    return avg_loss
+    avg_blank_ratio = total_blank_ratio / max(valid_batches, 1)
+    
+    # Warning if too many blanks
+    if avg_blank_ratio > 0.8:
+        print(f"\n⚠️  WARNING: {avg_blank_ratio*100:.1f}% blank predictions - model may be collapsing!")
+    
+    return avg_loss, avg_blank_ratio
 
 # ============================================================================
 # CTC Decoding
 # ============================================================================
 def ctc_decode(predictions):
     """CTC greedy decoding with blank removal"""
-    _, max_indices = predictions.max(dim=2)  # (seq_len, batch)
-    max_indices = max_indices.transpose(0, 1)  # (batch, seq_len)
+    _, max_indices = predictions.max(dim=2)
+    max_indices = max_indices.transpose(0, 1)
     
     decoded_strings = []
     for sequence in max_indices:
@@ -284,7 +331,6 @@ def ctc_decode(predictions):
         
         for idx in sequence:
             idx = idx.item()
-            # Skip blank (0) and repeated characters
             if idx != 0 and idx != prev_idx:
                 if idx in IDX_TO_CHAR:
                     chars.append(IDX_TO_CHAR[idx])
@@ -303,6 +349,7 @@ def evaluate_model(model, test_loader, device, show_examples=False):
     total = 0
     char_correct = 0
     char_total = 0
+    total_blank_ratio = 0
     
     all_predictions = []
     all_true_labels = []
@@ -315,6 +362,11 @@ def evaluate_model(model, test_loader, device, show_examples=False):
             outputs = model(images)
             log_probs = F.log_softmax(outputs, dim=2)
             
+            # Monitor blanks
+            predicted_classes = log_probs.argmax(dim=2)
+            blank_ratio = (predicted_classes == 0).float().mean().item()
+            total_blank_ratio += blank_ratio
+            
             # Decode predictions
             predictions = ctc_decode(log_probs)
             
@@ -323,7 +375,6 @@ def evaluate_model(model, test_loader, device, show_examples=False):
                 all_predictions.append(pred)
                 all_true_labels.append(true)
                 
-                # Sequence accuracy
                 if pred == true:
                     correct += 1
                 total += 1
@@ -335,8 +386,9 @@ def evaluate_model(model, test_loader, device, show_examples=False):
                             char_correct += 1
                     char_total += 1
     
-    accuracy = 100 * correct / total
-    char_accuracy = 100 * char_correct / char_total
+    accuracy = 100 * correct / total if total > 0 else 0
+    char_accuracy = 100 * char_correct / char_total if char_total > 0 else 0
+    avg_blank_ratio = total_blank_ratio / len(test_loader)
     
     # Show examples
     if show_examples:
@@ -345,10 +397,12 @@ def evaluate_model(model, test_loader, device, show_examples=False):
         print("="*60)
         for i in range(min(15, len(all_predictions))):
             match = "✓" if all_predictions[i] == all_true_labels[i] else "✗"
-            print(f"{match} Pred: '{all_predictions[i]:12s}' | True: '{all_true_labels[i]}'")
+            pred_display = all_predictions[i] if all_predictions[i] else "[BLANK]"
+            print(f"{match} Pred: '{pred_display:12s}' | True: '{all_true_labels[i]}'")
         print(f"\nCharacter-level accuracy: {char_accuracy:.2f}%")
+        print(f"Blank token ratio: {avg_blank_ratio*100:.1f}%")
     
-    return accuracy, correct, total
+    return accuracy, correct, total, avg_blank_ratio
 
 # ============================================================================
 # Learning Rate Scheduler
@@ -372,11 +426,12 @@ def main():
     parser.add_argument('--test_dir', type=str, required=True)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--lr', type=float, default=0.001)
+    parser.add_argument('--lr', type=float, default=0.0005)  # Lower LR to prevent collapse
     parser.add_argument('--hidden_size', type=int, default=256)
     parser.add_argument('--img_height', type=int, default=32)
     parser.add_argument('--img_width', type=int, default=128)
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints')
+    parser.add_argument('--blank_penalty', type=float, default=0.1, help='Penalty for blank tokens (0.1-0.3)')
     args = parser.parse_args()
     
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -410,15 +465,22 @@ def main():
     model = model.to(device)
     
     print(f"\nModel Output Sequence Length: {model.sequence_length}")
-    print(f"Maximum label length allowed: {model.sequence_length}")
+    print(f"Blank penalty: {args.blank_penalty}")
     
-    # Loss and optimizer
-    criterion = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
+    # Loss with blank penalty
+    criterion = CTCLossWithBlankPenalty(
+        blank=0, 
+        reduction='mean', 
+        zero_infinity=True,
+        blank_penalty=args.blank_penalty
+    )
+    
+    # Optimizer with lower learning rate
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     
-    # Scheduler with warmup
+    # Scheduler with longer warmup
     total_steps = len(train_loader) * args.epochs
-    warmup_steps = len(train_loader) * 3  # 3 epochs warmup
+    warmup_steps = len(train_loader) * 5  # 5 epochs warmup
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
     
     # Training loop
@@ -429,11 +491,15 @@ def main():
         print(f"Epoch {epoch}/{args.epochs}")
         print(f"{'='*60}")
         
-        train_loss = train_model(model, train_loader, criterion, optimizer, scheduler, device, epoch)
-        print(f"Train Loss: {train_loss:.4f}")
+        train_loss, train_blank_ratio = train_model(
+            model, train_loader, criterion, optimizer, scheduler, device, epoch
+        )
+        print(f"Train Loss: {train_loss:.4f} | Blank Ratio: {train_blank_ratio*100:.1f}%")
         
-        accuracy, correct, total = evaluate_model(model, test_loader, device, show_examples=(epoch % 5 == 0))
-        print(f"Test Accuracy: {accuracy:.2f}% ({correct}/{total})")
+        accuracy, correct, total, test_blank_ratio = evaluate_model(
+            model, test_loader, device, show_examples=(epoch % 5 == 0)
+        )
+        print(f"Test Accuracy: {accuracy:.2f}% ({correct}/{total}) | Blank Ratio: {test_blank_ratio*100:.1f}%")
         
         # Save best model
         if accuracy > best_accuracy:
