@@ -43,8 +43,17 @@ class CaptchaPreprocess:
         # Convert to grayscale
         img = np.array(img.convert('L'))
         
-        # Light denoising only
+        # CLAHE for better contrast (helps with character recognition)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        img = clahe.apply(img)
+        
+        # Light denoising
         img = cv2.medianBlur(img, 3)
+        
+        # Sharpen to enhance edges
+        kernel = np.array([[-1,-1,-1], [-1, 9,-1], [-1,-1,-1]])
+        img = cv2.filter2D(img, -1, kernel)
+        img = np.clip(img, 0, 255).astype(np.uint8)
         
         # Resize
         img = cv2.resize(img, (self.img_width, self.img_height))
@@ -161,33 +170,37 @@ class EnhancedCRNNModel(nn.Module):
         self.simple_cnn = simple_cnn
         
         if simple_cnn:
-            # Simpler CNN without residual blocks (better for smaller datasets)
+            # Much simpler CNN - proven architecture for CAPTCHA
             self.cnn = nn.Sequential(
-                nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),
+                # Block 1
+                nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
+                nn.BatchNorm2d(32),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2)),
+                
+                # Block 2
+                nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
                 nn.BatchNorm2d(64),
                 nn.ReLU(inplace=True),
                 nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2)),
                 
+                # Block 3
                 nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
                 nn.BatchNorm2d(128),
                 nn.ReLU(inplace=True),
-                nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2)),
+                nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
                 
+                # Block 4
                 nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
                 nn.BatchNorm2d(256),
                 nn.ReLU(inplace=True),
                 nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
-                
-                nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1),
-                nn.BatchNorm2d(512),
-                nn.ReLU(inplace=True),
             )
-            # Spatial attention still helps even with simple CNN
-            self.attention = SpatialAttention(512)
-            self.pool_final = nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1))
+            # Light attention
+            self.attention = SpatialAttention(256)
+            self.pool_final = nn.Sequential()  # No final pool
         else:
-            # Original complex CNN with residual blocks
-            # Initial convolution
+            # Medium complexity with residual blocks
             self.conv1 = nn.Sequential(
                 nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),
                 nn.BatchNorm2d(64),
@@ -195,22 +208,24 @@ class EnhancedCRNNModel(nn.Module):
                 nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2)),
             )
             
-            # Residual blocks for deeper feature extraction
+            # Only 2 residual blocks instead of 4
             self.res1 = ResidualBlock(64, 128, stride=1)
             self.pool1 = nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2))
             
             self.res2 = ResidualBlock(128, 256, stride=1)
             self.pool2 = nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1))
             
-            self.res3 = ResidualBlock(256, 256, stride=1)
-            self.pool3 = nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1))
-            
-            self.res4 = ResidualBlock(256, 512, stride=1)
+            # Direct conv instead of residual
+            self.conv2 = nn.Sequential(
+                nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
+                nn.BatchNorm2d(256),
+                nn.ReLU(inplace=True),
+            )
             
             # Spatial attention mechanism
-            self.attention = SpatialAttention(512)
+            self.attention = SpatialAttention(256)
             
-            self.pool4 = nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1))
+            self.pool3 = nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1))
         
         self.rnn_input_size = self._get_rnn_input_size(img_height, img_width)
         self.sequence_length = self._get_sequence_length(img_height, img_width)
@@ -218,13 +233,13 @@ class EnhancedCRNNModel(nn.Module):
         print(f"RNN input size: {self.rnn_input_size}")
         print(f"Output sequence length: {self.sequence_length}")
         
-        # Bidirectional LSTM with more capacity
+        # Bidirectional LSTM - single layer first for stability
         self.rnn = nn.LSTM(
             input_size=self.rnn_input_size,
             hidden_size=hidden_size,
-            num_layers=2,
+            num_layers=1,  # Start with 1 layer
             bidirectional=True,
-            dropout=0.2,  # Lower dropout for better learning
+            dropout=0.0,  # No dropout with 1 layer
             batch_first=False
         )
         
@@ -233,9 +248,9 @@ class EnhancedCRNNModel(nn.Module):
         
         # Initialize weights
         self._initialize_weights()
-        # Bias blank token to be MUCH less likely initially
+        # Strong bias against blank token
         with torch.no_grad():
-            self.fc.bias[0] = -3.0  # Make blank much less likely
+            self.fc.bias[0] = -4.0  # Very strong bias against blank
     
     def _get_sequence_length(self, img_height, img_width):
         with torch.no_grad():
@@ -252,17 +267,20 @@ class EnhancedCRNNModel(nn.Module):
             return c * h
     
     def forward_cnn(self, x):
-        """Forward pass through CNN with residual connections and attention"""
-        x = self.conv1(x)
-        x = self.res1(x)
-        x = self.pool1(x)
-        x = self.res2(x)
-        x = self.pool2(x)
-        x = self.res3(x)
-        x = self.pool3(x)
-        x = self.res4(x)
-        x = self.attention(x)  # Apply spatial attention
-        x = self.pool4(x)
+        """Forward pass through CNN with optional residual connections and attention"""
+        if self.simple_cnn:
+            x = self.cnn(x)
+            x = self.attention(x)
+            x = self.pool_final(x)
+        else:
+            x = self.conv1(x)
+            x = self.res1(x)
+            x = self.pool1(x)
+            x = self.res2(x)
+            x = self.pool2(x)
+            x = self.conv2(x)
+            x = self.attention(x)
+            x = self.pool3(x)
         return x
     
     def _initialize_weights(self):
@@ -510,13 +528,14 @@ def main():
     parser.add_argument('--test_dir', type=str, required=True)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--lr', type=float, default=0.001)  # Higher LR for deeper model
-    parser.add_argument('--hidden_size', type=int, default=512)  # Larger capacity
+    parser.add_argument('--lr', type=float, default=0.001)  # Higher LR for faster convergence
+    parser.add_argument('--hidden_size', type=int, default=256)  # Standard size
     parser.add_argument('--img_height', type=int, default=32)
     parser.add_argument('--img_width', type=int, default=128)
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints')
-    parser.add_argument('--blank_penalty', type=float, default=0.3, help='Penalty for blank tokens (0.1-0.5)')  # More aggressive
+    parser.add_argument('--blank_penalty', type=float, default=0.5, help='Penalty for blank tokens (0.1-0.7)')  # Very aggressive
     parser.add_argument('--simple_cnn', action='store_true', help='Use simpler CNN without residual blocks')
+    parser.add_argument('--warmup_epochs', type=int, default=5, help='Number of warmup epochs')
     args = parser.parse_args()
     
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -545,11 +564,13 @@ def main():
         num_classes=NUM_CLASSES, 
         hidden_size=args.hidden_size, 
         img_height=args.img_height,
-        img_width=args.img_width
+        img_width=args.img_width,
+        simple_cnn=args.simple_cnn
     )
     model = model.to(device)
     
-    print(f"\nModel: Enhanced CRNN with Attention + Residual Connections")
+    model_type = "Simple CNN + Attention" if args.simple_cnn else "Residual CNN + Attention"
+    print(f"\nModel: Enhanced CRNN with {model_type}")
     print(f"Model Output Sequence Length: {model.sequence_length}")
     print(f"Blank penalty: {args.blank_penalty}")
     
@@ -561,12 +582,12 @@ def main():
         blank_penalty=args.blank_penalty
     )
     
-    # Optimizer with proper learning rate for deeper model
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.001)
+    # Optimizer with appropriate learning rate
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.0001)  # Less regularization
     
-    # Scheduler with longer warmup for deeper architecture
+    # Shorter warmup for faster initial learning
     total_steps = len(train_loader) * args.epochs
-    warmup_steps = len(train_loader) * 10  # 10 epochs warmup for stability
+    warmup_steps = len(train_loader) * args.warmup_epochs
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
     
     # Training loop
