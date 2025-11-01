@@ -1,10 +1,11 @@
 """
 Fixed CAPTCHA Recognition System - Prevents CTC Blank Token Collapse
-Key fixes:
-1. Added blank penalty to discourage excessive blank predictions
-2. Better initialization to avoid saturation
-3. Label smoothing equivalent for CTC
-4. Monitoring blank token usage
+Key improvements:
+1. Added spatial attention mechanism
+2. Residual connections for deeper CNN
+3. Better initialization to avoid saturation
+4. Blank penalty to discourage excessive blank predictions
+5. Monitoring blank token usage
 """
 
 import torch
@@ -105,42 +106,83 @@ def collate_fn(batch):
     return images, labels_concat, label_lengths, label_strs
 
 # ============================================================================
-# Model Architecture with Better Initialization
+# Spatial Attention Module
 # ============================================================================
-class CRNNModel(nn.Module):
+class SpatialAttention(nn.Module):
+    """Spatial attention to focus on character regions"""
+    def __init__(self, in_channels):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, 1, kernel_size=1)
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, x):
+        attention = self.conv(x)
+        attention = self.sigmoid(attention)
+        return x * attention
+
+# ============================================================================
+# Residual Block
+# ============================================================================
+class ResidualBlock(nn.Module):
+    """Residual block for deeper CNN without gradient issues"""
+    def __init__(self, in_channels, out_channels, stride=1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, 
+                               stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3,
+                               stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, 
+                         stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels)
+            )
+    
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += self.shortcut(x)
+        out = F.relu(out)
+        return out
+
+# ============================================================================
+# Enhanced Model with Attention and Residual Connections
+# ============================================================================
+class EnhancedCRNNModel(nn.Module):
     def __init__(self, num_classes, hidden_size=256, img_height=32, img_width=128):
         super().__init__()
         
         self.img_height = img_height
         self.img_width = img_width
         
-        # CNN feature extractor
-        self.cnn = nn.Sequential(
+        # Initial convolution
+        self.conv1 = nn.Sequential(
             nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2)),
-            
-            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2)),
-            
-            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
-            
-            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
-            
-            nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(512),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
         )
+        
+        # Residual blocks for deeper feature extraction
+        self.res1 = ResidualBlock(64, 128, stride=1)
+        self.pool1 = nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2))
+        
+        self.res2 = ResidualBlock(128, 256, stride=1)
+        self.pool2 = nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1))
+        
+        self.res3 = ResidualBlock(256, 256, stride=1)
+        self.pool3 = nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1))
+        
+        self.res4 = ResidualBlock(256, 512, stride=1)
+        
+        # Spatial attention mechanism
+        self.attention = SpatialAttention(512)
+        
+        self.pool4 = nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1))
         
         self.rnn_input_size = self._get_rnn_input_size(img_height, img_width)
         self.sequence_length = self._get_sequence_length(img_height, img_width)
@@ -161,7 +203,7 @@ class CRNNModel(nn.Module):
         # Final classification layer
         self.fc = nn.Linear(hidden_size * 2, num_classes)
         
-        # CRITICAL: Initialize final layer with small bias towards non-blank
+        # Initialize weights
         self._initialize_weights()
         # Bias blank token to be less likely initially
         with torch.no_grad():
@@ -170,16 +212,30 @@ class CRNNModel(nn.Module):
     def _get_sequence_length(self, img_height, img_width):
         with torch.no_grad():
             dummy = torch.zeros(1, 1, img_height, img_width)
-            features = self.cnn(dummy)
+            features = self.forward_cnn(dummy)
             _, _, _, w = features.shape
             return w
     
     def _get_rnn_input_size(self, img_height, img_width):
         with torch.no_grad():
             dummy = torch.zeros(1, 1, img_height, img_width)
-            features = self.cnn(dummy)
+            features = self.forward_cnn(dummy)
             _, c, h, w = features.shape
             return c * h
+    
+    def forward_cnn(self, x):
+        """Forward pass through CNN with residual connections and attention"""
+        x = self.conv1(x)
+        x = self.res1(x)
+        x = self.pool1(x)
+        x = self.res2(x)
+        x = self.pool2(x)
+        x = self.res3(x)
+        x = self.pool3(x)
+        x = self.res4(x)
+        x = self.attention(x)  # Apply spatial attention
+        x = self.pool4(x)
+        return x
     
     def _initialize_weights(self):
         for m in self.modules():
@@ -202,8 +258,8 @@ class CRNNModel(nn.Module):
                         nn.init.constant_(param, 0)
 
     def forward(self, x):
-        # CNN
-        conv_features = self.cnn(x)
+        # CNN with residual connections and attention
+        conv_features = self.forward_cnn(x)
         batch, channels, height, width = conv_features.size()
         
         # Reshape for RNN
@@ -455,8 +511,8 @@ def main():
     print(f"Training samples: {len(train_dataset)}")
     print(f"Test samples: {len(test_dataset)}")
     
-    # Model
-    model = CRNNModel(
+    # Enhanced Model with Attention and Residual Connections
+    model = EnhancedCRNNModel(
         num_classes=NUM_CLASSES, 
         hidden_size=args.hidden_size, 
         img_height=args.img_height,
@@ -464,7 +520,8 @@ def main():
     )
     model = model.to(device)
     
-    print(f"\nModel Output Sequence Length: {model.sequence_length}")
+    print(f"\nModel: Enhanced CRNN with Attention + Residual Connections")
+    print(f"Model Output Sequence Length: {model.sequence_length}")
     print(f"Blank penalty: {args.blank_penalty}")
     
     # Loss with blank penalty
