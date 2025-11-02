@@ -7,4 +7,6 @@ python main.py \
     --test_dir ../../test/ \
     --epochs 20 \
     --batch_size 32 \
-    --lr 0.0003
+    --lr 0.0003 \
+    --epochs 150 \
+    --hidden_size 128 \
