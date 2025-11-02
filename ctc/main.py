@@ -50,11 +50,6 @@ class CaptchaPreprocess:
         # Basic preprocessing
         img = cv2.resize(img, (self.img_width, self.img_height))
         
-        # Adaptive thresholding can help separate characters from background
-        if not self.augment:
-            # Apply Otsu's thresholding for test images
-            _, img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
         # Optional augmentation for training
         if self.augment:
             # Random slight rotation
@@ -66,17 +61,8 @@ class CaptchaPreprocess:
             
             # Random brightness
             if np.random.rand() < 0.3:
-                factor = np.random.uniform(0.7, 1.3)
+                factor = np.random.uniform(0.8, 1.2)
                 img = np.clip(img * factor, 0, 255).astype(np.uint8)
-            
-            # Random noise
-            if np.random.rand() < 0.2:
-                noise = np.random.normal(0, 5, img.shape)
-                img = np.clip(img + noise, 0, 255).astype(np.uint8)
-            
-            # Random blur
-            if np.random.rand() < 0.2:
-                img = cv2.GaussianBlur(img, (3, 3), 0)
         
         # CLAHE for contrast
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -229,12 +215,9 @@ class ImprovedCRNN(nn.Module):
             hidden_size=hidden_size,
             num_layers=2,
             bidirectional=True,
-            dropout=0.2,  # Increased dropout to prevent overfitting
+            dropout=0.1,
             batch_first=False
         )
-        
-        # Add dropout before final layer
-        self.dropout = nn.Dropout(0.3)
         
         # Output layer
         self.fc = nn.Linear(hidden_size * 2, num_classes)
@@ -286,36 +269,36 @@ class ImprovedCRNN(nn.Module):
         # RNN
         rnn_out, _ = self.rnn(conv_features)
         
-        # Apply dropout
-        rnn_out = self.dropout(rnn_out)
-        
         # Classifier
         output = self.fc(rnn_out)
         return output
 
 # ============================================================================
-# Label Smoothing CTC Loss - Prevents Overconfidence
+# Focal CTC Loss - Better than blank penalty
 # ============================================================================
-class LabelSmoothCTCLoss(nn.Module):
-    def __init__(self, blank=0, smoothing=0.1, reduction='mean'):
+class FocalCTCLoss(nn.Module):
+    def __init__(self, blank=0, gamma=2.0, reduction='mean'):
         super().__init__()
         self.blank = blank
-        self.smoothing = smoothing
+        self.gamma = gamma
         self.reduction = reduction
-        self.ctc_loss = nn.CTCLoss(blank=blank, reduction=reduction, zero_infinity=True)
+        self.ctc_loss = nn.CTCLoss(blank=blank, reduction='none', zero_infinity=True)
     
     def forward(self, log_probs, targets, input_lengths, target_lengths):
         # Standard CTC loss
-        loss = self.ctc_loss(log_probs, targets, input_lengths, target_lengths)
+        losses = self.ctc_loss(log_probs, targets, input_lengths, target_lengths)
         
-        # Add label smoothing regularization
-        if self.smoothing > 0:
-            # Smooth by encouraging uniform distribution over non-blank tokens
-            num_classes = log_probs.size(2)
-            smooth_loss = -log_probs.mean()
-            loss = (1 - self.smoothing) * loss + self.smoothing * smooth_loss
+        # Apply focal weighting
+        p = torch.exp(-losses)
+        focal_weight = (1 - p) ** self.gamma
+        focal_losses = focal_weight * losses
         
-        return loss
+        if self.reduction == 'mean':
+            return focal_losses.mean()
+        elif self.reduction == 'sum':
+            return focal_losses.sum()
+        else:
+            return focal_losses
 
 # ============================================================================
 # Training
@@ -501,10 +484,10 @@ def main():
         print("⚠️  WARNING: Sequence length might be too short!")
     
     # Focal CTC Loss
-    criterion = LabelSmoothCTCLoss(blank=0, smoothing=0.1)
+    criterion = FocalCTCLoss(blank=0, gamma=2.0)
     
-    # Optimizer with higher weight decay to prevent overfitting
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.05)
+    # Optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     
     # Learning rate scheduler
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
