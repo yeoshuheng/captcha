@@ -1,11 +1,11 @@
 """
-Fixed CAPTCHA Recognition System - Prevents CTC Blank Token Collapse
+Improved CAPTCHA Recognition System
 Key improvements:
-1. Added spatial attention mechanism
-2. Residual connections for deeper CNN
-3. Better initialization to avoid saturation
-4. Blank penalty to discourage excessive blank predictions
-5. Monitoring blank token usage
+1. Better architecture with preserved spatial resolution
+2. More stable training with proper initialization
+3. Focal CTC loss to handle class imbalance
+4. Better data augmentation
+5. Comprehensive debugging tools
 """
 
 import torch
@@ -23,51 +23,61 @@ import cv2
 import numpy as np
 
 # ============================================================================
-# Character set for CAPTCHA (alphanumeric)
+# Character set for CAPTCHA
 # ============================================================================
 CHARSET = string.digits + string.ascii_lowercase + string.ascii_uppercase
 CHAR_TO_IDX = {char: idx + 1 for idx, char in enumerate(CHARSET)}
 IDX_TO_CHAR = {idx + 1: char for idx, char in enumerate(CHARSET)}
-NUM_CLASSES = len(CHARSET) + 1  # +1 for CTC blank token (index 0)
+NUM_CLASSES = len(CHARSET) + 1  # +1 for CTC blank token
+
+print(f"Character set size: {len(CHARSET)}")
+print(f"Total classes (with blank): {NUM_CLASSES}")
 
 # ============================================================================
-# CAPTCHA preprocessing (simplified)
+# Enhanced Preprocessing with Augmentation
 # ============================================================================
 class CaptchaPreprocess:
-    def __init__(self, img_height=32, img_width=128):
+    def __init__(self, img_height=64, img_width=200, augment=False):
         self.img_height = img_height
         self.img_width = img_width
+        self.augment = augment
         self.normalize = T.Normalize(mean=[0.5], std=[0.5])
 
     def __call__(self, img):
         # Convert to grayscale
         img = np.array(img.convert('L'))
         
-        # CLAHE for better contrast (helps with character recognition)
+        # Basic preprocessing
+        img = cv2.resize(img, (self.img_width, self.img_height))
+        
+        # Optional augmentation for training
+        if self.augment:
+            # Random slight rotation
+            if np.random.rand() < 0.3:
+                angle = np.random.uniform(-5, 5)
+                M = cv2.getRotationMatrix2D((self.img_width/2, self.img_height/2), angle, 1.0)
+                img = cv2.warpAffine(img, M, (self.img_width, self.img_height), 
+                                    borderMode=cv2.BORDER_REPLICATE)
+            
+            # Random brightness
+            if np.random.rand() < 0.3:
+                factor = np.random.uniform(0.8, 1.2)
+                img = np.clip(img * factor, 0, 255).astype(np.uint8)
+        
+        # CLAHE for contrast
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         img = clahe.apply(img)
         
-        # Light denoising
-        img = cv2.medianBlur(img, 3)
-        
-        # Sharpen to enhance edges
-        kernel = np.array([[-1,-1,-1], [-1, 9,-1], [-1,-1,-1]])
-        img = cv2.filter2D(img, -1, kernel)
-        img = np.clip(img, 0, 255).astype(np.uint8)
-        
-        # Resize
-        img = cv2.resize(img, (self.img_width, self.img_height))
-        
-        # Convert to tensor and normalize
+        # Convert to tensor
         img = torch.from_numpy(img).unsqueeze(0).float() / 255.0
         img = self.normalize(img)
         return img
 
 # ============================================================================
-# Dataset with validation
+# Dataset
 # ============================================================================
 class CaptchaDataset(Dataset):
-    def __init__(self, image_dir, img_height=32, img_width=128, max_label_len=10):
+    def __init__(self, image_dir, img_height=64, img_width=200, max_label_len=10, augment=False):
         self.image_paths = []
         self.labels = []
         self.max_label_len = max_label_len
@@ -76,8 +86,7 @@ class CaptchaDataset(Dataset):
         for path in Path(image_dir).glob("*.png"):
             label = path.stem.split('-')[0]
             
-            # Validate label
-            if len(label) > max_label_len:
+            if len(label) > max_label_len or len(label) == 0:
                 skipped += 1
                 continue
             if not all(c in CHARSET for c in label):
@@ -88,9 +97,14 @@ class CaptchaDataset(Dataset):
             self.labels.append(label)
         
         if skipped > 0:
-            print(f"Skipped {skipped} samples with invalid labels")
+            print(f"Skipped {skipped} invalid samples")
         
-        self.transform = CaptchaPreprocess(img_height, img_width)
+        # Calculate statistics
+        label_lengths = [len(label) for label in self.labels]
+        print(f"Label length range: {min(label_lengths)} - {max(label_lengths)}")
+        print(f"Average label length: {np.mean(label_lengths):.1f}")
+        
+        self.transform = CaptchaPreprocess(img_height, img_width, augment=augment)
 
     def __len__(self):
         return len(self.image_paths)
@@ -104,9 +118,6 @@ class CaptchaDataset(Dataset):
         
         return img, label_indices, label
 
-# ============================================================================
-# Collate Function
-# ============================================================================
 def collate_fn(batch):
     images, labels, label_strs = zip(*batch)
     images = torch.stack(images, dim=0)
@@ -115,173 +126,115 @@ def collate_fn(batch):
     return images, labels_concat, label_lengths, label_strs
 
 # ============================================================================
-# Spatial Attention Module
+# Improved CNN Architecture - Preserves More Spatial Info
 # ============================================================================
-class SpatialAttention(nn.Module):
-    """Spatial attention to focus on character regions"""
-    def __init__(self, in_channels):
+class ImprovedCNN(nn.Module):
+    """CNN that maintains good sequence length for CTC"""
+    def __init__(self):
         super().__init__()
-        self.conv = nn.Conv2d(in_channels, 1, kernel_size=1)
-        self.sigmoid = nn.Sigmoid()
-    
-    def forward(self, x):
-        attention = self.conv(x)
-        attention = self.sigmoid(attention)
-        return x * attention
-
-# ============================================================================
-# Residual Block
-# ============================================================================
-class ResidualBlock(nn.Module):
-    """Residual block for deeper CNN without gradient issues"""
-    def __init__(self, in_channels, out_channels, stride=1):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, 
-                               stride=stride, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3,
-                               stride=1, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_channels)
         
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_channels != out_channels:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1, 
-                         stride=stride, bias=False),
-                nn.BatchNorm2d(out_channels)
-            )
+        # Block 1: 64x200 -> 32x100
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        
+        # Block 2: 32x100 -> 16x50
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        
+        # Block 3: 16x50 -> 8x50 (only pool height)
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1))
+        )
+        
+        # Block 4: 8x50 -> 4x50 (only pool height)
+        self.conv4 = nn.Sequential(
+            nn.Conv2d(256, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1))
+        )
+        
+        # Block 5: Keep spatial resolution
+        self.conv5 = nn.Sequential(
+            nn.Conv2d(512, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True)
+        )
     
     def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out += self.shortcut(x)
-        out = F.relu(out)
-        return out
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        x = self.conv4(x)
+        x = self.conv5(x)
+        return x
 
 # ============================================================================
-# Enhanced Model with Attention and Residual Connections
+# Complete CRNN Model
 # ============================================================================
-class EnhancedCRNNModel(nn.Module):
-    def __init__(self, num_classes, hidden_size=256, img_height=32, img_width=128, simple_cnn=False):
+class ImprovedCRNN(nn.Module):
+    def __init__(self, num_classes, hidden_size=256, img_height=64, img_width=200):
         super().__init__()
         
         self.img_height = img_height
         self.img_width = img_width
-        self.simple_cnn = simple_cnn
         
-        if simple_cnn:
-            # Much simpler CNN - proven architecture for CAPTCHA
-            self.cnn = nn.Sequential(
-                # Block 1
-                nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
-                nn.BatchNorm2d(32),
-                nn.ReLU(inplace=True),
-                nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2)),
-                
-                # Block 2
-                nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
-                nn.BatchNorm2d(64),
-                nn.ReLU(inplace=True),
-                nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2)),
-                
-                # Block 3
-                nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
-                nn.BatchNorm2d(128),
-                nn.ReLU(inplace=True),
-                nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
-                
-                # Block 4
-                nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
-                nn.BatchNorm2d(256),
-                nn.ReLU(inplace=True),
-                nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
-            )
-            # Light attention
-            self.attention = SpatialAttention(256)
-            self.pool_final = nn.Sequential()  # No final pool
-        else:
-            # Medium complexity with residual blocks
-            self.conv1 = nn.Sequential(
-                nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1),
-                nn.BatchNorm2d(64),
-                nn.ReLU(inplace=True),
-                nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2)),
-            )
-            
-            # Only 2 residual blocks instead of 4
-            self.res1 = ResidualBlock(64, 128, stride=1)
-            self.pool1 = nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2))
-            
-            self.res2 = ResidualBlock(128, 256, stride=1)
-            self.pool2 = nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1))
-            
-            # Direct conv instead of residual
-            self.conv2 = nn.Sequential(
-                nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
-                nn.BatchNorm2d(256),
-                nn.ReLU(inplace=True),
-            )
-            
-            # Spatial attention mechanism
-            self.attention = SpatialAttention(256)
-            
-            self.pool3 = nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1))
+        # CNN
+        self.cnn = ImprovedCNN()
         
-        self.rnn_input_size = self._get_rnn_input_size(img_height, img_width)
-        self.sequence_length = self._get_sequence_length(img_height, img_width)
+        # Calculate dimensions
+        self.rnn_input_size = self._get_rnn_input_size()
+        self.sequence_length = self._get_sequence_length()
         
+        print(f"CNN output: {self.sequence_length} timesteps")
         print(f"RNN input size: {self.rnn_input_size}")
-        print(f"Output sequence length: {self.sequence_length}")
         
-        # Bidirectional LSTM - single layer first for stability
+        # Bidirectional LSTM with 2 layers
         self.rnn = nn.LSTM(
             input_size=self.rnn_input_size,
             hidden_size=hidden_size,
-            num_layers=1,  # Start with 1 layer
+            num_layers=2,
             bidirectional=True,
-            dropout=0.0,  # No dropout with 1 layer
+            dropout=0.1,
             batch_first=False
         )
         
-        # Final classification layer
+        # Output layer
         self.fc = nn.Linear(hidden_size * 2, num_classes)
         
-        # Initialize weights
         self._initialize_weights()
-        # Strong bias against blank token
-        with torch.no_grad():
-            self.fc.bias[0] = -4.0  # Very strong bias against blank
     
-    def _get_sequence_length(self, img_height, img_width):
+    def _get_sequence_length(self):
         with torch.no_grad():
-            dummy = torch.zeros(1, 1, img_height, img_width)
-            features = self.forward_cnn(dummy)
-            _, _, _, w = features.shape
-            return w
+            dummy = torch.zeros(1, 1, self.img_height, self.img_width)
+            features = self.cnn(dummy)
+            return features.size(3)
     
-    def _get_rnn_input_size(self, img_height, img_width):
+    def _get_rnn_input_size(self):
         with torch.no_grad():
-            dummy = torch.zeros(1, 1, img_height, img_width)
-            features = self.forward_cnn(dummy)
-            _, c, h, w = features.shape
-            return c * h
-    
-    def forward_cnn(self, x):
-        """Forward pass through CNN with optional residual connections and attention"""
-        if self.simple_cnn:
-            x = self.cnn(x)
-            x = self.attention(x)
-            x = self.pool_final(x)
-        else:
-            x = self.conv1(x)
-            x = self.res1(x)
-            x = self.pool1(x)
-            x = self.res2(x)
-            x = self.pool2(x)
-            x = self.conv2(x)
-            x = self.attention(x)
-            x = self.pool3(x)
-        return x
+            dummy = torch.zeros(1, 1, self.img_height, self.img_width)
+            features = self.cnn(dummy)
+            return features.size(1) * features.size(2)
     
     def _initialize_weights(self):
         for m in self.modules():
@@ -293,22 +246,23 @@ class EnhancedCRNNModel(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Linear):
-                # Smaller initialization to prevent saturation
-                nn.init.xavier_uniform_(m.weight, gain=0.5)
+                nn.init.xavier_uniform_(m.weight)
                 nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.LSTM):
                 for name, param in m.named_parameters():
-                    if 'weight' in name:
+                    if 'weight_ih' in name:
+                        nn.init.xavier_uniform_(param)
+                    elif 'weight_hh' in name:
                         nn.init.orthogonal_(param)
                     elif 'bias' in name:
                         nn.init.constant_(param, 0)
 
     def forward(self, x):
-        # CNN with residual connections and attention
-        conv_features = self.forward_cnn(x)
+        # CNN features
+        conv_features = self.cnn(x)
         batch, channels, height, width = conv_features.size()
         
-        # Reshape for RNN
+        # Reshape for RNN: (width, batch, channels*height)
         conv_features = conv_features.permute(3, 0, 1, 2)
         conv_features = conv_features.reshape(width, batch, channels * height)
         
@@ -320,109 +274,102 @@ class EnhancedCRNNModel(nn.Module):
         return output
 
 # ============================================================================
-# CTC Loss with Blank Penalty
+# Focal CTC Loss - Better than blank penalty
 # ============================================================================
-class CTCLossWithBlankPenalty(nn.Module):
-    def __init__(self, blank=0, reduction='mean', zero_infinity=True, blank_penalty=0.0):
+class FocalCTCLoss(nn.Module):
+    def __init__(self, blank=0, gamma=2.0, reduction='mean'):
         super().__init__()
-        self.ctc_loss = nn.CTCLoss(blank=blank, reduction=reduction, zero_infinity=zero_infinity)
-        self.blank_penalty = blank_penalty
         self.blank = blank
+        self.gamma = gamma
+        self.reduction = reduction
+        self.ctc_loss = nn.CTCLoss(blank=blank, reduction='none', zero_infinity=True)
     
     def forward(self, log_probs, targets, input_lengths, target_lengths):
         # Standard CTC loss
-        ctc_loss = self.ctc_loss(log_probs, targets, input_lengths, target_lengths)
+        losses = self.ctc_loss(log_probs, targets, input_lengths, target_lengths)
         
-        # Add penalty for predicting blank tokens
-        if self.blank_penalty > 0:
-            # Get probabilities for blank token
-            blank_probs = torch.exp(log_probs[:, :, self.blank])
-            blank_penalty = self.blank_penalty * blank_probs.mean()
-            return ctc_loss + blank_penalty
+        # Apply focal weighting
+        p = torch.exp(-losses)
+        focal_weight = (1 - p) ** self.gamma
+        focal_losses = focal_weight * losses
         
-        return ctc_loss
+        if self.reduction == 'mean':
+            return focal_losses.mean()
+        elif self.reduction == 'sum':
+            return focal_losses.sum()
+        else:
+            return focal_losses
 
 # ============================================================================
-# Training with Blank Token Monitoring
+# Training
 # ============================================================================
-def train_model(model, train_loader, criterion, optimizer, scheduler, device, epoch):
+def train_epoch(model, train_loader, criterion, optimizer, scheduler, device, epoch):
     model.train()
     total_loss = 0
     valid_batches = 0
-    total_blank_ratio = 0
+    blank_predictions = []
     
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
-    for batch_idx, (images, labels, label_lengths, label_strs) in enumerate(pbar):
+    for images, labels, label_lengths, label_strs in pbar:
         images = images.to(device)
         labels = labels.to(device)
         label_lengths = label_lengths.to(device)
         
-        # Forward pass
+        # Forward
         outputs = model(images)
         log_probs = F.log_softmax(outputs, dim=2)
         
-        # Monitor blank token predictions
+        # Monitor blank ratio
         with torch.no_grad():
-            predicted_classes = log_probs.argmax(dim=2)
-            blank_ratio = (predicted_classes == 0).float().mean().item()
-            total_blank_ratio += blank_ratio
+            pred_classes = log_probs.argmax(dim=2)
+            blank_ratio = (pred_classes == 0).float().mean().item()
+            blank_predictions.append(blank_ratio)
         
-        # CTC setup
+        # CTC loss
         seq_len = log_probs.size(0)
         batch_size = log_probs.size(1)
         input_lengths = torch.full((batch_size,), seq_len, dtype=torch.long, device=device)
         
-        # Validate
-        max_label_len = label_lengths.max().item()
-        if seq_len < max_label_len:
-            print(f"\nERROR: seq_len ({seq_len}) < max_label_len ({max_label_len})")
+        # Verify sequence length is sufficient
+        if seq_len < label_lengths.max().item():
+            print(f"\nWARNING: seq_len {seq_len} < max_label_len {label_lengths.max().item()}")
             continue
         
-        # Compute loss
         try:
             loss = criterion(log_probs, labels, input_lengths, label_lengths)
         except RuntimeError as e:
-            print(f"\nCTC Loss Error: {e}")
+            print(f"\nCTC Error: {e}")
             continue
         
-        # Check for invalid loss
         if torch.isnan(loss) or torch.isinf(loss):
-            print(f"\nSkipping batch {batch_idx}: invalid loss")
+            print(f"\nSkipping batch: invalid loss")
             continue
         
-        # Backward pass
+        # Backward
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
-        scheduler.step()
+        if scheduler:
+            scheduler.step()
         
         total_loss += loss.item()
         valid_batches += 1
-        current_lr = optimizer.param_groups[0]['lr']
         
-        # Show blank ratio in progress bar
-        avg_blank = total_blank_ratio / valid_batches
         pbar.set_postfix({
             'loss': f'{loss.item():.4f}',
-            'blank%': f'{blank_ratio*100:.1f}',
-            'lr': f'{current_lr:.6f}'
+            'blank%': f'{blank_ratio*100:.1f}'
         })
     
     avg_loss = total_loss / max(valid_batches, 1)
-    avg_blank_ratio = total_blank_ratio / max(valid_batches, 1)
+    avg_blank = np.mean(blank_predictions) if blank_predictions else 0
     
-    # Warning if too many blanks
-    if avg_blank_ratio > 0.8:
-        print(f"\n⚠️  WARNING: {avg_blank_ratio*100:.1f}% blank predictions - model may be collapsing!")
-    
-    return avg_loss, avg_blank_ratio
+    return avg_loss, avg_blank
 
 # ============================================================================
 # CTC Decoding
 # ============================================================================
 def ctc_decode(predictions):
-    """CTC greedy decoding with blank removal"""
     _, max_indices = predictions.max(dim=2)
     max_indices = max_indices.transpose(0, 1)
     
@@ -445,79 +392,53 @@ def ctc_decode(predictions):
 # ============================================================================
 # Evaluation
 # ============================================================================
-def evaluate_model(model, test_loader, device, show_examples=False):
+def evaluate(model, test_loader, device, show_examples=False):
     model.eval()
     correct = 0
     total = 0
     char_correct = 0
     char_total = 0
-    total_blank_ratio = 0
     
-    all_predictions = []
-    all_true_labels = []
+    predictions_list = []
+    labels_list = []
     
     with torch.no_grad():
-        for batch_idx, (images, labels_concat, label_lengths, label_strs) in enumerate(tqdm(test_loader, desc="Evaluating")):
+        for images, _, _, label_strs in tqdm(test_loader, desc="Evaluating"):
             images = images.to(device)
             
-            # Forward pass
             outputs = model(images)
             log_probs = F.log_softmax(outputs, dim=2)
-            
-            # Monitor blanks
-            predicted_classes = log_probs.argmax(dim=2)
-            blank_ratio = (predicted_classes == 0).float().mean().item()
-            total_blank_ratio += blank_ratio
-            
-            # Decode predictions
             predictions = ctc_decode(log_probs)
             
-            # Compare with true labels
             for pred, true in zip(predictions, label_strs):
-                all_predictions.append(pred)
-                all_true_labels.append(true)
+                predictions_list.append(pred)
+                labels_list.append(true)
                 
                 if pred == true:
                     correct += 1
                 total += 1
                 
-                # Character-level accuracy
-                for i in range(max(len(pred), len(true))):
-                    if i < len(pred) and i < len(true):
-                        if pred[i] == true[i]:
-                            char_correct += 1
-                    char_total += 1
+                # Character accuracy
+                min_len = min(len(pred), len(true))
+                for i in range(min_len):
+                    if pred[i] == true[i]:
+                        char_correct += 1
+                char_total += max(len(pred), len(true))
     
     accuracy = 100 * correct / total if total > 0 else 0
-    char_accuracy = 100 * char_correct / char_total if char_total > 0 else 0
-    avg_blank_ratio = total_blank_ratio / len(test_loader)
+    char_acc = 100 * char_correct / char_total if char_total > 0 else 0
     
-    # Show examples
     if show_examples:
-        print("\n" + "="*60)
+        print("\n" + "="*70)
         print("Sample Predictions:")
-        print("="*60)
-        for i in range(min(15, len(all_predictions))):
-            match = "✓" if all_predictions[i] == all_true_labels[i] else "✗"
-            pred_display = all_predictions[i] if all_predictions[i] else "[BLANK]"
-            print(f"{match} Pred: '{pred_display:12s}' | True: '{all_true_labels[i]}'")
-        print(f"\nCharacter-level accuracy: {char_accuracy:.2f}%")
-        print(f"Blank token ratio: {avg_blank_ratio*100:.1f}%")
+        print("="*70)
+        for i in range(min(20, len(predictions_list))):
+            match = "✓" if predictions_list[i] == labels_list[i] else "✗"
+            print(f"{match} Pred: {predictions_list[i]:12s} | True: {labels_list[i]}")
+        print(f"\nSequence Accuracy: {accuracy:.2f}%")
+        print(f"Character Accuracy: {char_acc:.2f}%")
     
-    return accuracy, correct, total, avg_blank_ratio
-
-# ============================================================================
-# Learning Rate Scheduler
-# ============================================================================
-def get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps):
-    def lr_lambda(current_step):
-        if current_step < warmup_steps:
-            return float(current_step) / float(max(1, warmup_steps))
-        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
-        return max(0.0, 0.5 * (1.0 + np.cos(np.pi * progress)))
-    
-    from torch.optim.lr_scheduler import LambdaLR
-    return LambdaLR(optimizer, lr_lambda)
+    return accuracy, char_acc
 
 # ============================================================================
 # Main
@@ -526,112 +447,86 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--train_dir', type=str, required=True)
     parser.add_argument('--test_dir', type=str, required=True)
-    parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--lr', type=float, default=0.001)  # Higher LR for faster convergence
-    parser.add_argument('--hidden_size', type=int, default=256)  # Standard size
-    parser.add_argument('--img_height', type=int, default=32)
-    parser.add_argument('--img_width', type=int, default=128)
+    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--lr', type=float, default=0.0003)
+    parser.add_argument('--hidden_size', type=int, default=256)
+    parser.add_argument('--img_height', type=int, default=64)
+    parser.add_argument('--img_width', type=int, default=200)
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints')
-    parser.add_argument('--blank_penalty', type=float, default=0.5, help='Penalty for blank tokens (0.1-0.7)')  # Very aggressive
-    parser.add_argument('--simple_cnn', action='store_true', help='Use simpler CNN without residual blocks')
-    parser.add_argument('--warmup_epochs', type=int, default=5, help='Number of warmup epochs')
     args = parser.parse_args()
     
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    print(f"Using device: {device}\n")
     
-    # Load datasets
-    print("Loading datasets...")
-    train_dataset = CaptchaDataset(args.train_dir, args.img_height, args.img_width)
-    test_dataset = CaptchaDataset(args.test_dir, args.img_height, args.img_width)
+    # Datasets with augmentation for training
+    train_dataset = CaptchaDataset(args.train_dir, args.img_height, args.img_width, augment=True)
+    test_dataset = CaptchaDataset(args.test_dir, args.img_height, args.img_width, augment=False)
     
-    train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True,
-        collate_fn=collate_fn, num_workers=4, pin_memory=True
-    )
-    test_loader = DataLoader(
-        test_dataset, batch_size=args.batch_size, shuffle=False,
-        collate_fn=collate_fn, num_workers=4, pin_memory=True
-    )
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
+                             collate_fn=collate_fn, num_workers=4, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False,
+                            collate_fn=collate_fn, num_workers=4, pin_memory=True)
     
     print(f"Training samples: {len(train_dataset)}")
-    print(f"Test samples: {len(test_dataset)}")
+    print(f"Test samples: {len(test_dataset)}\n")
     
-    # Enhanced Model with Attention and Residual Connections
-    model = EnhancedCRNNModel(
-        num_classes=NUM_CLASSES, 
-        hidden_size=args.hidden_size, 
-        img_height=args.img_height,
-        img_width=args.img_width,
-        simple_cnn=args.simple_cnn
-    )
+    # Model
+    model = ImprovedCRNN(NUM_CLASSES, args.hidden_size, args.img_height, args.img_width)
     model = model.to(device)
     
-    model_type = "Simple CNN + Attention" if args.simple_cnn else "Residual CNN + Attention"
-    print(f"\nModel: Enhanced CRNN with {model_type}")
-    print(f"Model Output Sequence Length: {model.sequence_length}")
-    print(f"Blank penalty: {args.blank_penalty}")
+    # Check if sequence length is sufficient
+    max_label_len = max([len(label) for label in train_dataset.labels])
+    print(f"Max label length: {max_label_len}")
+    print(f"Model sequence length: {model.sequence_length}")
+    if model.sequence_length < max_label_len * 2:
+        print("⚠️  WARNING: Sequence length might be too short!")
     
-    # Loss with blank penalty
-    criterion = CTCLossWithBlankPenalty(
-        blank=0, 
-        reduction='mean', 
-        zero_infinity=True,
-        blank_penalty=args.blank_penalty
+    # Focal CTC Loss
+    criterion = FocalCTCLoss(blank=0, gamma=2.0)
+    
+    # Optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    
+    # Learning rate scheduler
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=args.lr,
+        epochs=args.epochs,
+        steps_per_epoch=len(train_loader),
+        pct_start=0.1,
+        anneal_strategy='cos'
     )
     
-    # Optimizer with appropriate learning rate
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.0001)  # Less regularization
-    
-    # Shorter warmup for faster initial learning
-    total_steps = len(train_loader) * args.epochs
-    warmup_steps = len(train_loader) * args.warmup_epochs
-    scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
-    
-    # Training loop
     best_accuracy = 0.0
     
     for epoch in range(1, args.epochs + 1):
-        print(f"\n{'='*60}")
+        print(f"\n{'='*70}")
         print(f"Epoch {epoch}/{args.epochs}")
-        print(f"{'='*60}")
+        print(f"{'='*70}")
         
-        train_loss, train_blank_ratio = train_model(
+        train_loss, blank_ratio = train_epoch(
             model, train_loader, criterion, optimizer, scheduler, device, epoch
         )
-        print(f"Train Loss: {train_loss:.4f} | Blank Ratio: {train_blank_ratio*100:.1f}%")
+        print(f"Train Loss: {train_loss:.4f} | Blank Ratio: {blank_ratio*100:.1f}%")
         
-        accuracy, correct, total, test_blank_ratio = evaluate_model(
-            model, test_loader, device, show_examples=(epoch % 5 == 0)
-        )
-        print(f"Test Accuracy: {accuracy:.2f}% ({correct}/{total}) | Blank Ratio: {test_blank_ratio*100:.1f}%")
+        accuracy, char_acc = evaluate(model, test_loader, device, show_examples=(epoch % 10 == 0))
+        print(f"Test Accuracy: {accuracy:.2f}% | Char Accuracy: {char_acc:.2f}%")
         
-        # Save best model
         if accuracy > best_accuracy:
             best_accuracy = accuracy
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'accuracy': accuracy,
-                'args': vars(args)
+                'char_accuracy': char_acc
             }, os.path.join(args.checkpoint_dir, 'best_model.pth'))
-            print(f"★ New best model! Accuracy: {accuracy:.2f}%")
-        
-        # Save checkpoint every 10 epochs
-        if epoch % 10 == 0:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'accuracy': accuracy
-            }, os.path.join(args.checkpoint_dir, f'checkpoint_epoch_{epoch}.pth'))
+            print(f"★ New best model saved! Accuracy: {accuracy:.2f}%")
     
-    print(f"\n{'='*60}")
-    print(f"Training Complete!")
-    print(f"Best accuracy: {best_accuracy:.2f}%")
-    print(f"{'='*60}")
+    print(f"\n{'='*70}")
+    print(f"Training Complete! Best Accuracy: {best_accuracy:.2f}%")
+    print(f"{'='*70}")
 
 if __name__ == '__main__':
     main()
