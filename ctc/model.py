@@ -1,6 +1,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class SelfAttention(nn.Module):
     def __init__(self, hidden_size):
@@ -39,7 +40,7 @@ class ResidualBlock(nn.Module):
         out = F.relu(out)
         return out
 
-class EnhancedCNN(nn.Module):
+class CNN(nn.Module):
     def __init__(self):
         super().__init__()
         
@@ -77,14 +78,14 @@ class EnhancedCNN(nn.Module):
         return x
 
 
-class EnhancedCRNN(nn.Module):
+class CRNN(nn.Module):
     def __init__(self, num_classes, hidden_size=256, img_height=64, img_width=200):
         super().__init__()
         
         self.img_height = img_height
         self.img_width = img_width
         
-        self.cnn = EnhancedCNN()
+        self.cnn = CNN()
         
         self.rnn_input_size = self._get_rnn_input_size()
         self.sequence_length = self._get_sequence_length()

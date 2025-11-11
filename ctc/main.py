@@ -4,9 +4,9 @@ from torch.utils.data import DataLoader
 import os
 from commons import NUM_CLASSES
 from dataset import CaptchaDataset, collate_fn
-from model import EnhancedCRNN
-from loss import LabelSmoothingCTCLoss
-from workflows import evaluate, train_epoch
+from model import CRNN
+from loss import SmoothCTC
+from workflows import evaluate, train
 
 def main():
     parser = argparse.ArgumentParser()
@@ -34,10 +34,10 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False,
                             collate_fn=collate_fn, num_workers=4, pin_memory=True)
     
-    model = EnhancedCRNN(NUM_CLASSES, args.hidden_size, args.img_height, args.img_width)
+    model = CRNN(NUM_CLASSES, args.hidden_size, args.img_height, args.img_width)
     model = model.to(device)
     
-    criterion = LabelSmoothingCTCLoss(blank=0, smoothing=args.label_smoothing)
+    criterion = SmoothCTC(blank=0, smoothing=args.label_smoothing)
     optimizer = torch.optim.AdamW(
         model.parameters(), 
         lr=args.lr, 
@@ -64,7 +64,7 @@ def main():
         print(f"epoch {epoch}/{args.epochs}")
         print(f"{'='*80}")
         
-        train_loss, blank_ratio = train_epoch(
+        train_loss, blank_ratio = train(
             model, train_loader, criterion, optimizer, scheduler, device, epoch
         )
         print(f"train loss: {train_loss:.4f} | blank ratio: {blank_ratio*100:.1f}%")

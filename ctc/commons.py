@@ -5,7 +5,7 @@ import numpy as np
 CHARSET = string.digits + string.ascii_lowercase + string.ascii_uppercase
 CHAR_TO_IDX = {char: idx + 1 for idx, char in enumerate(CHARSET)}
 IDX_TO_CHAR = {idx + 1: char for idx, char in enumerate(CHARSET)}
-NUM_CLASSES = len(CHARSET) + 1  # +1 for CTC blank token
+NUM_CLASSES = len(CHARSET) + 1  
 
 CONFUSABLE_GROUPS = [
     ['0', 'O', 'o'],

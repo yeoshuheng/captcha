@@ -5,7 +5,7 @@ from tqdm import tqdm
 
 from commons import ctc_decode
 
-def train_epoch(model, train_loader, criterion, optimizer, scheduler, device, epoch):
+def train(model, train_loader, criterion, optimizer, scheduler, device, epoch):
     model.train()
     total_loss = 0
     valid_batches = 0

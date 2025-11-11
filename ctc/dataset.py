@@ -8,7 +8,7 @@ from torch.utils.data import Dataset
 
 from commons import CHARSET, CHAR_TO_IDX
 
-class EnhancedCaptchaPreprocess:
+class CaptchaPreprocess:
     def __init__(self, img_height=64, img_width=200, augment=False):
         self.img_height = img_height
         self.img_width = img_width
@@ -97,7 +97,7 @@ class CaptchaDataset(Dataset):
         if skipped > 0:
             print(f"Skipped {skipped} invalid samples")
         
-        self.transform = EnhancedCaptchaPreprocess(img_height, img_width, augment=augment)
+        self.transform = CaptchaPreprocess(img_height, img_width, augment=augment)
 
     def __len__(self):
         return len(self.image_paths)
