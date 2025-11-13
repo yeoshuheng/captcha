@@ -93,8 +93,6 @@ def main():
             print(f"Substitution Rate:         {metrics['sub_rate']:.2f}%")
             print(f"Insertion Rate:            {metrics['ins_rate']:.2f}%")
             print(f"Deletion Rate:             {metrics['del_rate']:.2f}%")
-            print(f"Avg Confidence:            {metrics['avg_confidence']:.3f}")
-            print(f"Avg Inference Time:        {metrics['avg_inference_time']*1000:.2f} ms/sample")
             print("-" * 60)
             print("Accuracy by Length:")
             for length, acc in sorted(metrics.get('accuracy_by_length', {}).items()):
