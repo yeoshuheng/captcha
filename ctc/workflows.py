@@ -2,6 +2,9 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
+from collections import defaultdict
+import time
+import editdistance
 
 from commons import ctc_decode
 
@@ -63,14 +66,24 @@ def evaluate(model, test_loader, device):
     char_correct = 0
     char_total = 0
     
+    total_edit_distance = 0
+    total_length = 0
+    
+    substitutions = 0
+    insertions = 0
+    deletions = 0
+    
+    length_bins = defaultdict(lambda: {"correct": 0, "total": 0})
+    
     predictions_list = []
     labels_list = []
     confidences_list = []
     
+    start_time = time.time()
+    
     with torch.no_grad():
         for images, _, _, label_strs in tqdm(test_loader, desc="evaluation..."):
             images = images.to(device)
-            
             outputs = model(images)
             log_probs = F.log_softmax(outputs, dim=2)
             predictions, confidences = ctc_decode(log_probs)
@@ -89,9 +102,67 @@ def evaluate(model, test_loader, device):
                     if pred[i] == true[i]:
                         char_correct += 1
                 char_total += max(len(pred), len(true))
+                
+                ed = editdistance.eval(pred, true)
+                total_edit_distance += ed
+                total_length += len(true)
+                 
+                dp = np.zeros((len(true)+1, len(pred)+1), dtype=int)
+                for i in range(len(true)+1):
+                    dp[i][0] = i
+                for j in range(len(pred)+1):
+                    dp[0][j] = j
+                for i in range(1, len(true)+1):
+                    for j in range(1, len(pred)+1):
+                        cost = 0 if true[i-1] == pred[j-1] else 1
+                        dp[i][j] = min(
+                            dp[i-1][j] + 1,
+                            dp[i][j-1] + 1,
+                            dp[i-1][j-1] + cost
+                        )
+                i, j = len(true), len(pred)
+                while i > 0 or j > 0:
+                    if i > 0 and j > 0 and dp[i][j] == dp[i-1][j-1] and true[i-1] == pred[j-1]:
+                        i, j = i-1, j-1
+                    elif i > 0 and j > 0 and dp[i][j] == dp[i-1][j-1] + 1:
+                        substitutions += 1
+                        i, j = i-1, j-1
+                    elif i > 0 and dp[i][j] == dp[i-1][j] + 1:
+                        deletions += 1
+                        i -= 1
+                    elif j > 0 and dp[i][j] == dp[i][j-1] + 1:
+                        insertions += 1
+                        j -= 1
+                
+                length_bins[len(true)]["total"] += 1
+                if pred == true:
+                    length_bins[len(true)]["correct"] += 1
     
-    accuracy = 100 * correct / total if total > 0 else 0
+    inference_time = time.time() - start_time
+    avg_inference_time = inference_time / total if total > 0 else 0
+    
+    exact_match_acc = 100 * correct / total if total > 0 else 0
     char_acc = 100 * char_correct / char_total if char_total > 0 else 0
-    avg_confidence = np.mean(confidences_list) if confidences_list else 0
-        
-    return accuracy, char_acc, avg_confidence
+    norm_edit_distance = total_edit_distance / total_length if total_length > 0 else 0
+    
+    total_edits = substitutions + insertions + deletions
+    sub_rate = 100 * substitutions / total_edits if total_edits > 0 else 0
+    ins_rate = 100 * insertions / total_edits if total_edits > 0 else 0
+    del_rate = 100 * deletions / total_edits if total_edits > 0 else 0
+    
+    length_acc_values = [
+        100 * v["correct"] / v["total"] for v in length_bins.values() if v["total"] > 0
+    ]
+    length_acc = np.mean(length_acc_values) if length_acc_values else 0
+    
+    return {
+        "exact_match_acc": exact_match_acc,
+        "length_acc": length_acc,
+        "char_acc": char_acc,
+        "normalized_edit_distance": norm_edit_distance,
+        "sub_rate": sub_rate,
+        "ins_rate": ins_rate,
+        "del_rate": del_rate,
+        "avg_inference_time": avg_inference_time,
+        "total_samples": total
+    }

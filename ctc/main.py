@@ -56,8 +56,6 @@ def main():
     )
     
     best_accuracy = 0.0
-    patience = 20
-    patience_counter = 0
     
     for epoch in range(1, args.epochs + 1):
         print(f"\n{'='*80}")
@@ -69,25 +67,44 @@ def main():
         )
         print(f"train loss: {train_loss:.4f} | blank ratio: {blank_ratio*100:.1f}%")
         
-        accuracy, char_acc, avg_conf = evaluate(model, test_loader, device)
-        print(f"test acc: {accuracy:.2f}% | char: {char_acc:.2f}% | conf: {avg_conf:.3f}")
-        
-        if accuracy > best_accuracy:
-            best_accuracy = accuracy
-            patience_counter = 0
+        metrics = evaluate(model, test_loader, device)
+
+        print(
+            f"test acc: {metrics['exact_match_acc']:.2f}% | "
+            f"char: {metrics['char_acc']:.2f}% | "
+            f"NED: {metrics['normalized_edit_distance']:.4f}"
+        )
+
+        if metrics['exact_match_acc'] > best_accuracy:
+            best_accuracy = metrics['exact_match_acc']
+            save_path = os.path.join(args.checkpoint_dir, 'best_model.pth')
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
-                'accuracy': accuracy,
-                'char_accuracy': char_acc,
-                'confidence': avg_conf
-            }, os.path.join(args.checkpoint_dir, 'best_model.pth'))
-            print(f"new best model! acc: {accuracy:.2f}%")
-       
-    
-    print(f"\n{'='*80}")
-    print(f"training completed, top acc: {best_accuracy:.2f}%")
-    print(f"{'='*80}")
+                **metrics  
+            }, save_path)
+
+            print("=" * 60)
+            print(f"Epoch: {epoch}")
+            print(f"Exact Match Accuracy:      {metrics['exact_match_acc']:.2f}%")
+            print(f"Length Accuracy:           {metrics['length_acc']:.2f}%")
+            print(f"Character Accuracy:        {metrics['char_acc']:.2f}%")
+            print(f"Normalized Edit Dist.:     {metrics['normalized_edit_distance']:.4f}")
+            print(f"Substitution Rate:         {metrics['sub_rate']:.2f}%")
+            print(f"Insertion Rate:            {metrics['ins_rate']:.2f}%")
+            print(f"Deletion Rate:             {metrics['del_rate']:.2f}%")
+            print(f"Avg Confidence:            {metrics['avg_confidence']:.3f}")
+            print(f"Avg Inference Time:        {metrics['avg_inference_time']*1000:.2f} ms/sample")
+            print("-" * 60)
+            print("Accuracy by Length:")
+            for length, acc in sorted(metrics.get('accuracy_by_length', {}).items()):
+                print(f"  Length {length:2d}: {acc:.2f}%")
+            print("=" * 60, "\n")
+            
+            print(f"\n{'='*80}")
+            print(f"training completed, top Exact Match Accuracy: {best_accuracy:.2f}%")
+            print(f"{'='*80}")
+
 
 if __name__ == '__main__':
     main()
